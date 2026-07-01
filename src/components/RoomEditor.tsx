@@ -46,7 +46,15 @@ import {
   type ReactNode,
 } from "react";
 
-import type { FurnitureItem, Point, RoomPayload, RoomScene, RoomVersionSummary, WallToolType } from "@/lib/scene";
+import type {
+  FurnitureGroup,
+  FurnitureItem,
+  Point,
+  RoomPayload,
+  RoomScene,
+  RoomVersionSummary,
+  WallToolType,
+} from "@/lib/scene";
 
 type Tool = "select" | "pan" | "wall-line" | "wall-freehand" | "rect" | "circle";
 type SaveState = "idle" | "saving" | "saved" | "error";
@@ -82,6 +90,7 @@ type PinchStart = {
 const FURNITURE_COLORS = ["#d8eef2", "#f7d7cc", "#e9e1f5", "#dfead2", "#f3e2b8", "#dce3ee"];
 const WALL_COLOR = "#26313f";
 const MIN_SHAPE_SIZE = 20;
+const MAX_GRID_LINES = 900;
 
 export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   const [scene, setScene] = useState(initialRoom.scene);
@@ -122,6 +131,8 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<Konva.Stage>(null);
+  const sceneRef = useRef(initialRoom.scene);
+  const historyRef = useRef<HistoryState>({ past: [], future: [] });
   const canvasSizeRef = useRef({
     width: initialRoom.scene.canvas.width,
     height: initialRoom.scene.canvas.height,
@@ -170,6 +181,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   const canBlankPan = tool === "select" || isPanningMode;
   const zoomPercent = Math.round(zoom * 100);
   const hasUnsavedChanges = saveState === "idle" || saveState === "error";
+  const isHistoricalVersion = currentVersion < latestVersion;
 
   useEffect(() => {
     canvasSizeRef.current = {
@@ -201,21 +213,54 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
     canvasOffset,
   ]);
 
-  const commitScene = useCallback((updater: RoomScene | ((current: RoomScene) => RoomScene)) => {
-    setScene((current) => {
-      const next = typeof updater === "function" ? updater(current) : updater;
+  useEffect(() => {
+    if (!hasUnsavedChanges) {
+      return;
+    }
 
-      if (next === current) {
-        return current;
+    function handleBeforeUnload(event: BeforeUnloadEvent) {
+      event.preventDefault();
+      event.returnValue = "";
+    }
+
+    const currentUrl = window.location.href;
+    function handlePopState() {
+      if (window.confirm("저장하지 않은 변경사항이 사라집니다. 이동할까요?")) {
+        window.removeEventListener("beforeunload", handleBeforeUnload);
+        window.location.reload();
+        return;
       }
 
-      setHistory((currentHistory) => ({
-        past: [...currentHistory.past.slice(-59), current],
-        future: [],
-      }));
-      setSaveState("idle");
-      return next;
-    });
+      window.history.pushState(null, "", currentUrl);
+    }
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    window.addEventListener("popstate", handlePopState);
+
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+      window.removeEventListener("popstate", handlePopState);
+    };
+  }, [hasUnsavedChanges]);
+
+  const commitScene = useCallback((updater: RoomScene | ((current: RoomScene) => RoomScene)) => {
+    const current = sceneRef.current;
+    const next = typeof updater === "function" ? updater(current) : updater;
+
+    if (next === current) {
+      return;
+    }
+
+    const nextHistory: HistoryState = {
+      past: [...historyRef.current.past.slice(-59), current],
+      future: [],
+    };
+
+    sceneRef.current = next;
+    historyRef.current = nextHistory;
+    setScene(next);
+    setHistory(nextHistory);
+    setSaveState("idle");
   }, []);
 
   const loadVersions = useCallback(async () => {
@@ -229,7 +274,12 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
       }
 
       const payload = (await response.json()) as { versions: RoomVersionSummary[] };
+      const latest = payload.versions.find((version) => version.isLatest);
+
       setVersions(payload.versions);
+      if (latest) {
+        setLatestVersion(latest.version);
+      }
       setVersionListState("idle");
     } catch {
       setVersionListState("error");
@@ -280,13 +330,17 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   }
 
   function applyRoomPayload(payload: RoomPayload, options: { centerCanvas?: boolean } = {}) {
+    const emptyHistory: HistoryState = { past: [], future: [] };
+
+    sceneRef.current = payload.scene;
+    historyRef.current = emptyHistory;
     setScene(payload.scene);
     setUpdatedAt(payload.updatedAt);
     setCurrentVersion(payload.version);
     setLatestVersion(payload.latestVersion);
     setVersionName(payload.versionName);
     setVersionMemo(payload.versionMemo);
-    setHistory({ past: [], future: [] });
+    setHistory(emptyHistory);
     setSelectedIds([]);
     clearInProgressDrawing();
     setSaveState("saved");
@@ -330,61 +384,65 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
 
     commitScene((current) => {
       const selected = new Set(selectedIds);
+      const furniture = current.furniture.filter((item) => !selected.has(item.id));
+      const groups = current.groups.map((group) => ({
+        ...group,
+        itemIds: group.itemIds.filter((itemId) => !selected.has(itemId)),
+      }));
+      const normalized = normalizeFurnitureGroups(furniture, groups);
+
       return {
         ...current,
-        furniture: current.furniture.filter((item) => !selected.has(item.id)),
-        groups: current.groups
-          .map((group) => ({
-            ...group,
-            itemIds: group.itemIds.filter((itemId) => !selected.has(itemId)),
-          }))
-          .filter((group) => group.itemIds.length > 1),
+        furniture: normalized.furniture,
+        groups: normalized.groups,
       };
     });
     setSelectedIds([]);
   }, [commitScene, selectedIds]);
 
   const undo = useCallback(() => {
-    setHistory((currentHistory) => {
-      const previous = currentHistory.past.at(-1);
+    const currentHistory = historyRef.current;
+    const previous = currentHistory.past.at(-1);
 
-      if (!previous) {
-        return currentHistory;
-      }
+    if (!previous) {
+      return;
+    }
 
-      setScene(() => {
-        setSelectedIds([]);
-        setSaveState("idle");
-        return previous;
-      });
+    const currentScene = sceneRef.current;
+    const nextHistory: HistoryState = {
+      past: currentHistory.past.slice(0, -1),
+      future: [currentScene, ...currentHistory.future],
+    };
 
-      return {
-        past: currentHistory.past.slice(0, -1),
-        future: [scene, ...currentHistory.future],
-      };
-    });
-  }, [scene]);
+    sceneRef.current = previous;
+    historyRef.current = nextHistory;
+    setScene(previous);
+    setHistory(nextHistory);
+    setSelectedIds([]);
+    setSaveState("idle");
+  }, []);
 
   const redo = useCallback(() => {
-    setHistory((currentHistory) => {
-      const next = currentHistory.future[0];
+    const currentHistory = historyRef.current;
+    const next = currentHistory.future[0];
 
-      if (!next) {
-        return currentHistory;
-      }
+    if (!next) {
+      return;
+    }
 
-      setScene(() => {
-        setSelectedIds([]);
-        setSaveState("idle");
-        return next;
-      });
+    const currentScene = sceneRef.current;
+    const nextHistory: HistoryState = {
+      past: [...currentHistory.past, currentScene],
+      future: currentHistory.future.slice(1),
+    };
 
-      return {
-        past: [...currentHistory.past, scene],
-        future: currentHistory.future.slice(1),
-      };
-    });
-  }, [scene]);
+    sceneRef.current = next;
+    historyRef.current = nextHistory;
+    setScene(next);
+    setHistory(nextHistory);
+    setSelectedIds([]);
+    setSaveState("idle");
+  }, []);
 
   useEffect(() => {
     const transformer = transformerRef.current;
@@ -503,14 +561,21 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
 
   const gridLines = useMemo(() => {
     const lines: ReactElement[] = [];
-    const step = scene.canvas.gridSize;
+    let step = Math.max(1, scene.canvas.gridSize);
+
+    while (
+      Math.floor(scene.canvas.width / step) + Math.floor(scene.canvas.height / step) + 2 > MAX_GRID_LINES
+    ) {
+      step *= 5;
+    }
+    const majorStep = step * 5;
 
     for (let x = 0; x <= scene.canvas.width; x += step) {
       lines.push(
         <Line
           key={`v-${x}`}
           points={[x, 0, x, scene.canvas.height]}
-          stroke={x % (step * 5) === 0 ? "#c8ced8" : "#e7ebf0"}
+          stroke={x % majorStep === 0 ? "#c8ced8" : "#e7ebf0"}
           strokeWidth={1}
           listening={false}
         />,
@@ -522,7 +587,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
         <Line
           key={`h-${y}`}
           points={[0, y, scene.canvas.width, y]}
-          stroke={y % (step * 5) === 0 ? "#c8ced8" : "#e7ebf0"}
+          stroke={y % majorStep === 0 ? "#c8ced8" : "#e7ebf0"}
           strokeWidth={1}
           listening={false}
         />,
@@ -793,10 +858,22 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
 
     const start = dragState.positions[item.id];
     const currentTopLeft = topLeftFromNode(event.target);
-    const delta = {
+    const rawDelta = {
       x: currentTopLeft.x - start.x,
       y: currentTopLeft.y - start.y,
     };
+    const delta = clampFurnitureDragDelta(
+      dragState.ids,
+      dragState.positions,
+      scene.furniture,
+      rawDelta,
+      scene.canvas,
+    );
+
+    setNodeTopLeft(event.target, {
+      x: start.x + delta.x,
+      y: start.y + delta.y,
+    });
 
     for (const id of dragState.ids) {
       if (id === item.id) {
@@ -819,42 +896,46 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
 
   function handleDragEnd(item: FurnitureItem, event: Konva.KonvaEventObject<DragEvent>) {
     const dragState = dragStartRef.current;
-    const start = dragState?.positions[item.id] ?? { x: item.x, y: item.y };
     const rawTopLeft = topLeftFromNode(event.target);
-    const nextTopLeft = scene.canvas.snapToGrid ? snapPoint(rawTopLeft, scene.canvas.gridSize) : rawTopLeft;
-    const delta = {
-      x: nextTopLeft.x - start.x,
-      y: nextTopLeft.y - start.y,
-    };
     const ids = dragState?.ids ?? [item.id];
+    const positions = dragState?.positions ?? { [item.id]: { x: item.x, y: item.y } };
 
     dragStartRef.current = null;
 
-    commitScene((current) => ({
-      ...current,
-      furniture: current.furniture.map((candidate) => {
-        if (!ids.includes(candidate.id)) {
-          return candidate;
-        }
+    commitScene((current) => {
+      const start = positions[item.id] ?? { x: item.x, y: item.y };
+      const nextTopLeft = current.canvas.snapToGrid ? snapPoint(rawTopLeft, current.canvas.gridSize) : rawTopLeft;
+      const rawDelta = {
+        x: nextTopLeft.x - start.x,
+        y: nextTopLeft.y - start.y,
+      };
+      const delta = clampFurnitureDragDelta(ids, positions, current.furniture, rawDelta, current.canvas);
 
-        const origin = dragState?.positions[candidate.id] ?? { x: candidate.x, y: candidate.y };
-        const nextX = clamp(origin.x + delta.x, 0, current.canvas.width - candidate.width);
-        const nextY = clamp(origin.y + delta.y, 0, current.canvas.height - candidate.height);
+      return {
+        ...current,
+        furniture: current.furniture.map((candidate) => {
+          if (!ids.includes(candidate.id)) {
+            return candidate;
+          }
 
-        return {
-          ...candidate,
-          x: nextX,
-          y: nextY,
-        };
-      }),
-    }));
+          const origin = positions[candidate.id] ?? { x: candidate.x, y: candidate.y };
+
+          return {
+            ...candidate,
+            x: origin.x + delta.x,
+            y: origin.y + delta.y,
+          };
+        }),
+      };
+    });
   }
 
   function handleTransformEnd(item: FurnitureItem, event: Konva.KonvaEventObject<Event>) {
     const node = event.target;
-    const scaleX = node.scaleX();
-    const scaleY = node.scaleY();
+    const scaleX = Math.abs(node.scaleX());
+    const scaleY = Math.abs(node.scaleY());
     const rotation = normalizeRotation(node.rotation());
+    const position = clampNodeBoundsToCanvas(node, scene.canvas);
 
     node.scaleX(1);
     node.scaleY(1);
@@ -868,8 +949,8 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
           candidate.id === item.id
             ? {
                 ...candidate,
-                x: clamp(Math.round(node.x()), 0, current.canvas.width - diameter),
-                y: clamp(Math.round(node.y()), 0, current.canvas.height - diameter),
+                x: position.x,
+                y: position.y,
                 width: diameter,
                 height: diameter,
                 rotation,
@@ -889,8 +970,8 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
         candidate.id === item.id
           ? {
               ...candidate,
-              x: clamp(Math.round(node.x()), 0, current.canvas.width - width),
-              y: clamp(Math.round(node.y()), 0, current.canvas.height - height),
+              x: position.x,
+              y: position.y,
               width,
               height,
               rotation,
@@ -924,20 +1005,30 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
 
     const id = createId("group");
 
-    commitScene((current) => ({
-      ...current,
-      furniture: current.furniture.map((item) =>
-        selectedIds.includes(item.id) ? { ...item, groupId: id } : item,
-      ),
-      groups: [
-        ...current.groups.filter((group) => !group.itemIds.some((itemId) => selectedIds.includes(itemId))),
+    commitScene((current) => {
+      const selected = new Set(selectedIds);
+      const furniture = current.furniture.map((item) =>
+        selected.has(item.id) ? { ...item, groupId: id } : item,
+      );
+      const groups = [
+        ...current.groups.map((group) => ({
+          ...group,
+          itemIds: group.itemIds.filter((itemId) => !selected.has(itemId)),
+        })),
         {
           id,
           name: `그룹 ${current.groups.length + 1}`,
           itemIds: [...selectedIds],
         },
-      ],
-    }));
+      ];
+      const normalized = normalizeFurnitureGroups(furniture, groups);
+
+      return {
+        ...current,
+        furniture: normalized.furniture,
+        groups: normalized.groups,
+      };
+    });
   }
 
   function ungroupSelected() {
@@ -957,6 +1048,11 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   }
 
   async function saveRoom() {
+    if (isHistoricalVersion) {
+      openVersionPanel();
+      return;
+    }
+
     setSaveState("saving");
 
     try {
@@ -967,6 +1063,13 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
         },
         body: JSON.stringify({ version: currentVersion, scene }),
       });
+
+      if (response.status === 409) {
+        await loadVersions();
+        setSaveState("idle");
+        setIsVersionPanelOpen(true);
+        return;
+      }
 
       if (!response.ok) {
         throw new Error("Save failed");
@@ -1719,7 +1822,9 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
         <div className="min-w-0">
           <h1 className="truncate text-base font-semibold">{initialRoom.name ?? "Room Canvas"}</h1>
           <p className="truncate text-xs text-[#66707d]">
-            v{currentVersion} · {scene.canvas.width}px x {scene.canvas.height}px · 저장 {formatDate(updatedAt)}
+            v{currentVersion}
+            {isHistoricalVersion ? ` / 최신 v${latestVersion}` : ""} · {scene.canvas.width}px x {scene.canvas.height}px · 저장{" "}
+            {formatDate(updatedAt)}
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -1737,9 +1842,9 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
             <span className="hidden sm:inline">링크 복사</span>
           </button>
           <button className="primary-button" type="button" onClick={saveRoom} disabled={saveState === "saving"}>
-            {saveState === "saved" ? <Check size={16} aria-hidden /> : <Save size={16} aria-hidden />}
+            {!isHistoricalVersion && saveState === "saved" ? <Check size={16} aria-hidden /> : <Save size={16} aria-hidden />}
             <span className="hidden sm:inline">
-              {saveState === "saving" ? "저장 중" : saveState === "saved" ? "저장됨" : "저장"}
+              {isHistoricalVersion ? "새 버전" : saveState === "saving" ? "저장 중" : saveState === "saved" ? "저장됨" : "저장"}
             </span>
           </button>
         </div>
@@ -1804,6 +1909,11 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
           {saveState === "error" ? (
             <div className="absolute right-4 top-4 z-10 rounded-md border border-[#f2b8ad] bg-[#fff3f0] px-3 py-2 text-sm text-[#b42318]">
               저장하지 못했습니다.
+            </div>
+          ) : null}
+          {isHistoricalVersion ? (
+            <div className="absolute left-4 top-4 z-10 max-w-[calc(100%-2rem)] rounded-md border border-[#f1d18a] bg-[#fff8e5] px-3 py-2 text-sm text-[#6f4b00]">
+              과거 버전 편집 중입니다. 저장하려면 새 버전을 만드세요.
             </div>
           ) : null}
 
@@ -1905,7 +2015,11 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
                     <KonvaGroup
                       key={item.id}
                       ref={(node) => {
-                        shapeRefs.current[item.id] = node;
+                        if (node) {
+                          shapeRefs.current[item.id] = node;
+                        } else {
+                          delete shapeRefs.current[item.id];
+                        }
                       }}
                       x={item.x}
                       y={item.y}
@@ -1953,6 +2067,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
                   <Transformer
                     ref={transformerRef}
                     rotateEnabled
+                    flipEnabled={false}
                     keepRatio={selectedItems.some((item) => item.type === "circle")}
                     boundBoxFunc={(oldBox, newBox) =>
                       Math.abs(newBox.width) < MIN_SHAPE_SIZE || Math.abs(newBox.height) < MIN_SHAPE_SIZE
@@ -2043,8 +2158,8 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
                   <MobileToolButton title="되돌리기" disabled={history.past.length === 0} onClick={undo}>
                     <Undo2 size={19} aria-hidden />
                   </MobileToolButton>
-                  <MobileToolButton title="저장" disabled={saveState === "saving"} onClick={saveRoom}>
-                    {saveState === "saved" ? <Check size={19} aria-hidden /> : <Save size={19} aria-hidden />}
+                  <MobileToolButton title={isHistoricalVersion ? "새 버전으로 저장" : "저장"} disabled={saveState === "saving"} onClick={saveRoom}>
+                    {!isHistoricalVersion && saveState === "saved" ? <Check size={19} aria-hidden /> : <Save size={19} aria-hidden />}
                   </MobileToolButton>
                   <MobileToolButton title="설정" onClick={() => openMobilePanel("canvas")}>
                     <Settings size={19} aria-hidden />
@@ -2784,6 +2899,127 @@ function topLeftFromNode(node: Konva.Node): Point {
 
 function setNodeTopLeft(node: Konva.Node, point: Point) {
   node.position(point);
+}
+
+function normalizeFurnitureGroups(
+  furniture: FurnitureItem[],
+  groups: FurnitureGroup[],
+): Pick<RoomScene, "furniture" | "groups"> {
+  const furnitureIds = new Set(furniture.map((item) => item.id));
+  const itemGroupIds = new Map<string, string>();
+  const normalizedGroups: FurnitureGroup[] = [];
+
+  for (const group of groups) {
+    const itemIds = group.itemIds.filter(
+      (itemId, index, current) =>
+        furnitureIds.has(itemId) && current.indexOf(itemId) === index && !itemGroupIds.has(itemId),
+    );
+
+    if (itemIds.length < 2) {
+      continue;
+    }
+
+    for (const itemId of itemIds) {
+      itemGroupIds.set(itemId, group.id);
+    }
+
+    normalizedGroups.push({ ...group, itemIds });
+  }
+
+  return {
+    furniture: furniture.map((item) => {
+      const groupId = itemGroupIds.get(item.id);
+
+      if (groupId) {
+        return item.groupId === groupId ? item : { ...item, groupId };
+      }
+
+      if (!item.groupId) {
+        return item;
+      }
+
+      const itemWithoutGroup = { ...item };
+      delete itemWithoutGroup.groupId;
+      return itemWithoutGroup;
+    }),
+    groups: normalizedGroups,
+  };
+}
+
+function clampFurnitureDragDelta(
+  ids: string[],
+  positions: Record<string, Point>,
+  furniture: FurnitureItem[],
+  delta: Point,
+  canvas: RoomScene["canvas"],
+): Point {
+  const selectedIds = new Set(ids);
+  const selected = furniture.filter((item) => selectedIds.has(item.id) && positions[item.id]);
+
+  if (selected.length === 0) {
+    return delta;
+  }
+
+  const bounds = selected.reduce(
+    (current, item) => {
+      const position = positions[item.id];
+
+      return {
+        left: Math.min(current.left, position.x),
+        top: Math.min(current.top, position.y),
+        right: Math.max(current.right, position.x + item.width),
+        bottom: Math.max(current.bottom, position.y + item.height),
+      };
+    },
+    {
+      left: Number.POSITIVE_INFINITY,
+      top: Number.POSITIVE_INFINITY,
+      right: Number.NEGATIVE_INFINITY,
+      bottom: Number.NEGATIVE_INFINITY,
+    },
+  );
+
+  return {
+    x: clampToRange(delta.x, -bounds.left, canvas.width - bounds.right),
+    y: clampToRange(delta.y, -bounds.top, canvas.height - bounds.bottom),
+  };
+}
+
+function clampNodeBoundsToCanvas(node: Konva.Node, canvas: RoomScene["canvas"]): Point {
+  const bounds = node.getClientRect({ relativeTo: node.getParent() ?? undefined });
+  const offset = {
+    x: clampOverflowOffset(bounds.x, bounds.width, canvas.width),
+    y: clampOverflowOffset(bounds.y, bounds.height, canvas.height),
+  };
+
+  return {
+    x: Math.round(node.x() + offset.x),
+    y: Math.round(node.y() + offset.y),
+  };
+}
+
+function clampOverflowOffset(position: number, size: number, limit: number) {
+  if (size > limit) {
+    return -position;
+  }
+
+  if (position < 0) {
+    return -position;
+  }
+
+  if (position + size > limit) {
+    return limit - (position + size);
+  }
+
+  return 0;
+}
+
+function clampToRange(value: number, min: number, max: number) {
+  if (min > max) {
+    return 0;
+  }
+
+  return clamp(value, min, max);
 }
 
 function distance(first: Point, second: Point) {
