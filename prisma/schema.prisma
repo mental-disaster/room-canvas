@@ -13,12 +13,31 @@ datasource db {
 }
 
 model Room {
+  id            String        @id @default(cuid())
+  shareId       String        @unique
+  name          String?
+  width         Int
+  height        Int
+  scene         String
+  latestVersion Int           @default(1)
+  versions      RoomVersion[]
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+}
+
+model RoomVersion {
   id        String   @id @default(cuid())
-  shareId   String   @unique
-  name      String?
+  roomId    String
+  room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  version   Int
+  name      String
+  memo      String?
   width     Int
   height    Int
   scene     String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@unique([roomId, version])
+  @@index([roomId, version])
 }

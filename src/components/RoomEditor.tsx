@@ -18,6 +18,7 @@ import {
   Copy,
   Group,
   Hand,
+  History,
   ImagePlus,
   Minus,
   MousePointer2,
@@ -30,6 +31,7 @@ import {
   Ungroup,
   Undo2,
   Waypoints,
+  X,
 } from "lucide-react";
 import {
   useCallback,
@@ -37,16 +39,19 @@ import {
   useMemo,
   useRef,
   useState,
+  type FormEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactElement,
   type ReactNode,
   type WheelEvent as ReactWheelEvent,
 } from "react";
 
-import type { FurnitureItem, Point, RoomPayload, RoomScene, WallToolType } from "@/lib/scene";
+import type { FurnitureItem, Point, RoomPayload, RoomScene, RoomVersionSummary, WallToolType } from "@/lib/scene";
 
 type Tool = "select" | "pan" | "wall-line" | "wall-freehand" | "rect" | "circle";
 type SaveState = "idle" | "saving" | "saved" | "error";
+type VersionListState = "idle" | "loading" | "error";
+type VersionActionState = "idle" | "creating" | "switching" | "updating";
 type HistoryState = {
   past: RoomScene[];
   future: RoomScene[];
@@ -86,8 +91,16 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   });
   const [blueprintOpacity, setBlueprintOpacity] = useState(0.45);
   const [isBlueprintEditing, setIsBlueprintEditing] = useState(false);
-  const [saveState, setSaveState] = useState<SaveState>("idle");
+  const [saveState, setSaveState] = useState<SaveState>("saved");
   const [updatedAt, setUpdatedAt] = useState(initialRoom.updatedAt);
+  const [currentVersion, setCurrentVersion] = useState(initialRoom.version);
+  const [latestVersion, setLatestVersion] = useState(initialRoom.latestVersion);
+  const [versionName, setVersionName] = useState(initialRoom.versionName);
+  const [versionMemo, setVersionMemo] = useState(initialRoom.versionMemo);
+  const [versions, setVersions] = useState<RoomVersionSummary[]>([]);
+  const [isVersionPanelOpen, setIsVersionPanelOpen] = useState(false);
+  const [versionListState, setVersionListState] = useState<VersionListState>("idle");
+  const [versionActionState, setVersionActionState] = useState<VersionActionState>("idle");
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<Konva.Stage>(null);
@@ -139,6 +152,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   const stagePixelHeight = scene.canvas.height * zoom;
   const isPanningMode = tool === "pan" || isSpacePressed;
   const zoomPercent = Math.round(zoom * 100);
+  const hasUnsavedChanges = saveState === "idle" || saveState === "error";
 
   useEffect(() => {
     canvasSizeRef.current = {
@@ -185,10 +199,58 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
     });
   }, []);
 
-  const updateSceneWithoutHistory = useCallback((next: RoomScene) => {
-    setScene(next);
+  const loadVersions = useCallback(async () => {
+    setVersionListState("loading");
+
+    try {
+      const response = await fetch(`/api/rooms/${initialRoom.shareId}/versions`);
+
+      if (!response.ok) {
+        throw new Error("Version list failed");
+      }
+
+      const payload = (await response.json()) as { versions: RoomVersionSummary[] };
+      setVersions(payload.versions);
+      setVersionListState("idle");
+    } catch {
+      setVersionListState("error");
+    }
+  }, [initialRoom.shareId]);
+
+  function clearInProgressDrawing() {
+    setCurrentWallPoints([]);
+    currentWallPointsRef.current = [];
+    setIsLineDrawing(false);
+    isLineDrawingRef.current = false;
+    setFreehandPoints([]);
+    freehandPointsRef.current = [];
+    setIsFreehandDrawing(false);
+    isFreehandDrawingRef.current = false;
+  }
+
+  function applyRoomPayload(payload: RoomPayload) {
+    setScene(payload.scene);
+    setUpdatedAt(payload.updatedAt);
+    setCurrentVersion(payload.version);
+    setLatestVersion(payload.latestVersion);
+    setVersionName(payload.versionName);
+    setVersionMemo(payload.versionMemo);
+    setHistory({ past: [], future: [] });
+    setSelectedIds([]);
+    clearInProgressDrawing();
     setSaveState("saved");
-  }, []);
+  }
+
+  function pushVersionUrl(version: number) {
+    const url = new URL(window.location.href);
+    url.searchParams.set("version", String(version));
+    window.history.pushState(null, "", url);
+  }
+
+  function openVersionPanel() {
+    setIsVersionPanelOpen(true);
+    void loadVersions();
+  }
 
   const deleteSelected = useCallback(() => {
     if (selectedIds.length === 0) {
@@ -221,6 +283,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
 
       setScene(() => {
         setSelectedIds([]);
+        setSaveState("idle");
         return previous;
       });
 
@@ -241,6 +304,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
 
       setScene(() => {
         setSelectedIds([]);
+        setSaveState("idle");
         return next;
       });
 
@@ -801,7 +865,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ scene }),
+        body: JSON.stringify({ version: currentVersion, scene }),
       });
 
       if (!response.ok) {
@@ -809,10 +873,107 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
       }
 
       const payload = (await response.json()) as RoomPayload;
-      setUpdatedAt(payload.updatedAt);
-      updateSceneWithoutHistory(payload.scene);
+      applyRoomPayload(payload);
+      await loadVersions();
     } catch {
       setSaveState("error");
+    }
+  }
+
+  async function openVersion(version: number) {
+    if (version === currentVersion) {
+      setIsVersionPanelOpen(false);
+      return;
+    }
+
+    if (
+      hasUnsavedChanges &&
+      !window.confirm("저장하지 않은 변경사항이 사라집니다. 다른 버전을 열까요?")
+    ) {
+      return;
+    }
+
+    setVersionActionState("switching");
+
+    try {
+      const response = await fetch(`/api/rooms/${initialRoom.shareId}?version=${version}`);
+
+      if (!response.ok) {
+        throw new Error("Version open failed");
+      }
+
+      const payload = (await response.json()) as RoomPayload;
+      applyRoomPayload(payload);
+      pushVersionUrl(payload.version);
+      setVersionListState("idle");
+      setIsVersionPanelOpen(false);
+    } catch {
+      setVersionListState("error");
+    } finally {
+      setVersionActionState("idle");
+    }
+  }
+
+  async function createVersion(name: string, memo: string) {
+    setVersionActionState("creating");
+
+    try {
+      const response = await fetch(`/api/rooms/${initialRoom.shareId}/versions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ name, memo, scene }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Version creation failed");
+      }
+
+      const payload = (await response.json()) as RoomPayload;
+      applyRoomPayload(payload);
+      pushVersionUrl(payload.version);
+      await loadVersions();
+    } catch {
+      setVersionListState("error");
+    } finally {
+      setVersionActionState("idle");
+    }
+  }
+
+  async function updateVersionMeta(version: number, name: string, memo: string) {
+    setVersionActionState("updating");
+
+    try {
+      const response = await fetch(`/api/rooms/${initialRoom.shareId}/versions/${version}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ name, memo }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Version update failed");
+      }
+
+      const payload = (await response.json()) as { version: RoomVersionSummary };
+      setVersions((current) =>
+        current.map((candidate) =>
+          candidate.version === payload.version.version ? payload.version : candidate,
+        ),
+      );
+      setVersionListState("idle");
+
+      if (payload.version.version === currentVersion) {
+        setVersionName(payload.version.name);
+        setVersionMemo(payload.version.memo);
+        setUpdatedAt(payload.version.updatedAt);
+      }
+    } catch {
+      setVersionListState("error");
+    } finally {
+      setVersionActionState("idle");
     }
   }
 
@@ -1083,10 +1244,19 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
         <div className="min-w-0">
           <h1 className="truncate text-base font-semibold">{initialRoom.name ?? "Room Canvas"}</h1>
           <p className="text-xs text-[#66707d]">
-            {scene.canvas.width}px x {scene.canvas.height}px · 저장 {formatDate(updatedAt)}
+            v{currentVersion} · {scene.canvas.width}px x {scene.canvas.height}px · 저장 {formatDate(updatedAt)}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <button
+            className="command-button max-w-[12rem]"
+            type="button"
+            onClick={openVersionPanel}
+            title={versionMemo ? `${versionName} - ${versionMemo}` : versionName}
+          >
+            <History size={16} aria-hidden />
+            <span className="truncate">v{currentVersion} {versionName}</span>
+          </button>
           <button className="command-button" type="button" onClick={copyShareLink}>
             <Copy size={16} aria-hidden />
             링크 복사
@@ -1097,6 +1267,22 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
           </button>
         </div>
       </header>
+
+      {isVersionPanelOpen ? (
+        <VersionPanel
+          key={latestVersion}
+          versions={versions}
+          currentVersion={currentVersion}
+          latestVersion={latestVersion}
+          listState={versionListState}
+          actionState={versionActionState}
+          onClose={() => setIsVersionPanelOpen(false)}
+          onRefresh={loadVersions}
+          onSelect={openVersion}
+          onCreate={createVersion}
+          onUpdate={updateVersionMeta}
+        />
+      ) : null}
 
       <div className="grid flex-1 grid-cols-1 lg:grid-cols-[64px_minmax(0,1fr)_300px]">
         <aside className="flex gap-2 overflow-x-auto border-b border-[#d9dee7] bg-white p-2 lg:flex-col lg:border-b-0 lg:border-r">
@@ -1507,6 +1693,244 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
           </div>
         </aside>
       </div>
+    </div>
+  );
+}
+
+function VersionPanel({
+  versions,
+  currentVersion,
+  latestVersion,
+  listState,
+  actionState,
+  onClose,
+  onRefresh,
+  onSelect,
+  onCreate,
+  onUpdate,
+}: {
+  versions: RoomVersionSummary[];
+  currentVersion: number;
+  latestVersion: number;
+  listState: VersionListState;
+  actionState: VersionActionState;
+  onClose: () => void;
+  onRefresh: () => void | Promise<void>;
+  onSelect: (version: number) => void | Promise<void>;
+  onCreate: (name: string, memo: string) => void | Promise<void>;
+  onUpdate: (version: number, name: string, memo: string) => void | Promise<void>;
+}) {
+  const [newName, setNewName] = useState(`버전 ${latestVersion + 1}`);
+  const [newMemo, setNewMemo] = useState("");
+  const [editingVersion, setEditingVersion] = useState<number | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editMemo, setEditMemo] = useState("");
+  const isBusy = actionState !== "idle";
+
+  function submitNewVersion(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!newName.trim()) {
+      return;
+    }
+
+    void onCreate(newName, newMemo);
+  }
+
+  function beginEdit(version: RoomVersionSummary) {
+    setEditingVersion(version.version);
+    setEditName(version.name);
+    setEditMemo(version.memo ?? "");
+  }
+
+  function submitEditVersion(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!editingVersion || !editName.trim()) {
+      return;
+    }
+
+    void onUpdate(editingVersion, editName, editMemo);
+    setEditingVersion(null);
+  }
+
+  return (
+    <div className="fixed inset-0 z-30 bg-[#15181c]/35">
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-label="버전 관리"
+        className="ml-auto flex h-full w-full max-w-md flex-col bg-white shadow-xl"
+      >
+        <div className="flex min-h-14 items-center justify-between border-b border-[#d9dee7] px-4">
+          <div>
+            <h2 className="text-base font-semibold text-[#15181c]">버전</h2>
+            <p className="text-xs text-[#66707d]">기본 링크는 v{latestVersion}을 엽니다.</p>
+          </div>
+          <IconButton title="닫기" onClick={onClose}>
+            <X size={18} aria-hidden />
+          </IconButton>
+        </div>
+
+        <div className="grid gap-5 overflow-y-auto p-4">
+          <form onSubmit={submitNewVersion} className="grid gap-3 rounded-md border border-[#d9dee7] bg-[#f8fafc] p-3">
+            <PanelTitle title="새 버전" />
+            <label className="grid gap-2 text-sm font-medium text-[#252a31]">
+              이름
+              <input
+                value={newName}
+                onChange={(event) => setNewName(event.target.value)}
+                className="field-input"
+                maxLength={60}
+                required
+              />
+            </label>
+            <label className="grid gap-2 text-sm font-medium text-[#252a31]">
+              메모
+              <textarea
+                value={newMemo}
+                onChange={(event) => setNewMemo(event.target.value)}
+                className="min-h-20 w-full resize-y rounded-md border border-[#cbd2dc] bg-white p-3 text-sm outline-none transition focus:border-[#1c4f8f] focus:ring-2 focus:ring-[#cfe0f6]"
+                maxLength={500}
+              />
+            </label>
+            <button
+              className="primary-button justify-center"
+              type="submit"
+              disabled={isBusy || !newName.trim()}
+            >
+              <Plus size={16} aria-hidden />
+              {actionState === "creating" ? "생성 중" : "새 버전 만들기"}
+            </button>
+          </form>
+
+          <section className="grid gap-3">
+            <div className="flex items-center justify-between gap-3">
+              <PanelTitle title="버전 목록" />
+              <button
+                className="small-button"
+                type="button"
+                onClick={() => void onRefresh()}
+                disabled={isBusy || listState === "loading"}
+              >
+                새로고침
+              </button>
+            </div>
+
+            {listState === "error" ? (
+              <p className="rounded-md border border-[#f2b8ad] bg-[#fff3f0] px-3 py-2 text-sm text-[#b42318]">
+                버전 정보를 불러오지 못했습니다.
+              </p>
+            ) : null}
+
+            {listState === "loading" && versions.length === 0 ? (
+              <p className="text-sm text-[#59616d]">불러오는 중</p>
+            ) : null}
+
+            <div className="grid gap-2">
+              {versions.map((version) => {
+                const isCurrent = version.version === currentVersion;
+                const isEditing = version.version === editingVersion;
+
+                return (
+                  <article
+                    key={version.version}
+                    className={`grid gap-3 rounded-md border p-3 ${
+                      isCurrent ? "border-[#1c4f8f] bg-[#f2f7fd]" : "border-[#d9dee7] bg-white"
+                    }`}
+                  >
+                    {isEditing ? (
+                      <form onSubmit={submitEditVersion} className="grid gap-3">
+                        <label className="grid gap-2 text-sm font-medium text-[#252a31]">
+                          이름
+                          <input
+                            value={editName}
+                            onChange={(event) => setEditName(event.target.value)}
+                            className="field-input"
+                            maxLength={60}
+                            required
+                          />
+                        </label>
+                        <label className="grid gap-2 text-sm font-medium text-[#252a31]">
+                          메모
+                          <textarea
+                            value={editMemo}
+                            onChange={(event) => setEditMemo(event.target.value)}
+                            className="min-h-20 w-full resize-y rounded-md border border-[#cbd2dc] bg-white p-3 text-sm outline-none transition focus:border-[#1c4f8f] focus:ring-2 focus:ring-[#cfe0f6]"
+                            maxLength={500}
+                          />
+                        </label>
+                        <div className="grid grid-cols-2 gap-2">
+                          <button
+                            className="primary-button justify-center"
+                            type="submit"
+                            disabled={isBusy || !editName.trim()}
+                          >
+                            저장
+                          </button>
+                          <button
+                            className="small-button justify-center"
+                            type="button"
+                            onClick={() => setEditingVersion(null)}
+                            disabled={isBusy}
+                          >
+                            취소
+                          </button>
+                        </div>
+                      </form>
+                    ) : (
+                      <>
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-sm font-semibold text-[#15181c]">v{version.version}</span>
+                            <span className="min-w-0 truncate text-sm font-medium text-[#252a31]">
+                              {version.name}
+                            </span>
+                            {version.isLatest ? (
+                              <span className="rounded-sm bg-[#dfead2] px-1.5 py-0.5 text-xs font-semibold text-[#30451d]">
+                                최신
+                              </span>
+                            ) : null}
+                            {isCurrent ? (
+                              <span className="rounded-sm bg-[#dbeafe] px-1.5 py-0.5 text-xs font-semibold text-[#143a66]">
+                                현재
+                              </span>
+                            ) : null}
+                          </div>
+                          {version.memo ? (
+                            <p className="mt-1 line-clamp-2 text-sm text-[#59616d]">{version.memo}</p>
+                          ) : null}
+                          <p className="mt-2 text-xs text-[#66707d]">
+                            {version.width}px x {version.height}px · {formatDate(version.updatedAt)}
+                          </p>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <button
+                            className="command-button justify-center"
+                            type="button"
+                            onClick={() => void onSelect(version.version)}
+                            disabled={isBusy || isCurrent}
+                          >
+                            {isCurrent ? "열림" : actionState === "switching" ? "여는 중" : "열기"}
+                          </button>
+                          <button
+                            className="small-button justify-center"
+                            type="button"
+                            onClick={() => beginEdit(version)}
+                            disabled={isBusy}
+                          >
+                            수정
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+        </div>
+      </section>
     </div>
   );
 }

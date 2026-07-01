@@ -10,6 +10,7 @@ export async function POST(request: Request) {
   const height = safeDimension(body.height, 700);
   const name = typeof body.name === "string" && body.name.trim() ? body.name.trim() : null;
   const scene = createEmptyScene(width, height);
+  const serializedScene = serializeScene(scene);
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const shareId = randomBytes(7).toString("base64url");
@@ -21,7 +22,18 @@ export async function POST(request: Request) {
           name,
           width,
           height,
-          scene: serializeScene(scene),
+          scene: serializedScene,
+          latestVersion: 1,
+          versions: {
+            create: {
+              version: 1,
+              name: "기본 버전",
+              memo: null,
+              width,
+              height,
+              scene: serializedScene,
+            },
+          },
         },
         select: {
           shareId: true,
