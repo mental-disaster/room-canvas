@@ -74,6 +74,9 @@ export type RoomVersionSummary = {
   isLatest: boolean;
 };
 
+const MIN_FURNITURE_SIZE = 20;
+const MAX_PRISMA_INT = 2_147_483_647;
+
 export function createEmptyScene(width: number, height: number): RoomScene {
   return {
     schemaVersion: 1,
@@ -114,19 +117,43 @@ export function normalizeRoomScene(
     return null;
   }
 
+  const requireCollections = Boolean(options.requireCollections);
+  const requireCanvasDimensions = Boolean(options.requireCanvasDimensions);
   const hasValidCollections =
     Array.isArray(scene.walls) && Array.isArray(scene.furniture) && Array.isArray(scene.groups);
 
-  if (options.requireCollections && !hasValidCollections) {
+  if (requireCollections && !hasValidCollections) {
     return null;
   }
 
   const hasValidCanvasDimensions =
     Number.isFinite(scene.canvas.width) && Number.isFinite(scene.canvas.height);
 
-  if (options.requireCanvasDimensions && !hasValidCanvasDimensions) {
+  if (requireCanvasDimensions && !hasValidCanvasDimensions) {
     return null;
   }
+
+  const walls = normalizeCollection(scene.walls, normalizeWall, requireCollections);
+  const furniture = normalizeCollection(
+    scene.furniture,
+    normalizeFurnitureItem,
+    requireCollections,
+  );
+  const groups = normalizeCollection(scene.groups, normalizeFurnitureGroup, requireCollections);
+
+  if (!walls || !furniture || !groups) {
+    return null;
+  }
+
+  const uniqueWalls = uniqueById(walls, requireCollections);
+  const uniqueFurniture = uniqueById(furniture, requireCollections);
+  const uniqueGroups = uniqueById(groups, requireCollections);
+
+  if (!uniqueWalls || !uniqueFurniture || !uniqueGroups) {
+    return null;
+  }
+
+  const normalizedGroups = normalizeSceneFurnitureGroups(uniqueFurniture, uniqueGroups);
 
   return {
     schemaVersion: 1,
@@ -136,11 +163,263 @@ export function normalizeRoomScene(
       gridSize: safeGridSize(scene.canvas.gridSize),
       snapToGrid: Boolean(scene.canvas.snapToGrid),
     },
-    walls: Array.isArray(scene.walls) ? scene.walls : [],
-    furniture: Array.isArray(scene.furniture) ? scene.furniture : [],
-    groups: Array.isArray(scene.groups) ? scene.groups : [],
+    walls: uniqueWalls,
+    furniture: normalizedGroups.furniture,
+    groups: normalizedGroups.groups,
     meta: scene.meta && typeof scene.meta === "object" ? scene.meta : {},
   };
+}
+
+function normalizeCollection<T extends { id: string }>(
+  value: unknown,
+  normalizeEntry: (entry: unknown) => T | null,
+  rejectInvalidEntries: boolean,
+): T[] | null {
+  if (!Array.isArray(value)) {
+    return rejectInvalidEntries ? null : [];
+  }
+
+  const entries: T[] = [];
+
+  for (const entry of value) {
+    const normalized = normalizeEntry(entry);
+
+    if (!normalized) {
+      if (rejectInvalidEntries) {
+        return null;
+      }
+
+      continue;
+    }
+
+    entries.push(normalized);
+  }
+
+  return entries;
+}
+
+function normalizeWall(value: unknown): Wall | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const id = normalizeString(value.id, { allowEmpty: false, maxLength: 120 });
+  const toolType = value.toolType === "polyline" || value.toolType === "freehand" ? value.toolType : null;
+  const points = Array.isArray(value.points) ? value.points.map(normalizePoint) : null;
+  const strokeWidth = normalizeFiniteNumber(value.strokeWidth);
+  const color = normalizeString(value.color, { allowEmpty: false, maxLength: 80 });
+
+  if (!id || !toolType || !points || points.some((point) => !point) || strokeWidth === null || !color) {
+    return null;
+  }
+
+  const normalizedPoints = points.filter((point): point is Point => Boolean(point));
+
+  if (normalizedPoints.length < 2) {
+    return null;
+  }
+
+  return {
+    id,
+    toolType,
+    points: normalizedPoints,
+    strokeWidth: Math.round(clampNumber(strokeWidth, 1, 40)),
+    color,
+  };
+}
+
+function normalizeFurnitureItem(value: unknown): FurnitureItem | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const id = normalizeString(value.id, { allowEmpty: false, maxLength: 120 });
+  const type = value.type === "rect" || value.type === "circle" ? value.type : null;
+  const x = normalizeFiniteNumber(value.x);
+  const y = normalizeFiniteNumber(value.y);
+  const width = normalizeFiniteNumber(value.width);
+  const height = normalizeFiniteNumber(value.height);
+  const rotation = normalizeFiniteNumber(value.rotation);
+  const fill = normalizeString(value.fill, { allowEmpty: false, maxLength: 80 });
+  const label = normalizeString(value.label, { allowEmpty: true, maxLength: 32 });
+  const groupId =
+    value.groupId === undefined
+      ? undefined
+      : normalizeString(value.groupId, { allowEmpty: false, maxLength: 120 });
+
+  if (
+    !id ||
+    !type ||
+    x === null ||
+    y === null ||
+    width === null ||
+    height === null ||
+    width <= 0 ||
+    height <= 0 ||
+    rotation === null ||
+    !fill ||
+    label === null ||
+    groupId === null
+  ) {
+    return null;
+  }
+
+  return {
+    id,
+    type,
+    x: Math.round(x),
+    y: Math.round(y),
+    width: Math.max(MIN_FURNITURE_SIZE, Math.round(width)),
+    height: Math.max(MIN_FURNITURE_SIZE, Math.round(height)),
+    rotation: normalizeRotationValue(rotation),
+    fill,
+    label,
+    ...(groupId ? { groupId } : {}),
+  };
+}
+
+function normalizeFurnitureGroup(value: unknown): FurnitureGroup | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const id = normalizeString(value.id, { allowEmpty: false, maxLength: 120 });
+  const name = normalizeString(value.name, { allowEmpty: false, maxLength: 60 });
+  const itemIds = Array.isArray(value.itemIds)
+    ? value.itemIds.map((itemId) => normalizeString(itemId, { allowEmpty: false, maxLength: 120 }))
+    : null;
+
+  if (!id || !name || !itemIds || itemIds.some((itemId) => !itemId)) {
+    return null;
+  }
+
+  return {
+    id,
+    name,
+    itemIds: itemIds.filter((itemId): itemId is string => Boolean(itemId)),
+  };
+}
+
+function normalizeSceneFurnitureGroups(
+  furniture: FurnitureItem[],
+  groups: FurnitureGroup[],
+): Pick<RoomScene, "furniture" | "groups"> {
+  const furnitureIds = new Set(furniture.map((item) => item.id));
+  const itemGroupIds = new Map<string, string>();
+  const normalizedGroups: FurnitureGroup[] = [];
+
+  for (const group of groups) {
+    const itemIds = group.itemIds.filter(
+      (itemId, index, current) =>
+        furnitureIds.has(itemId) && current.indexOf(itemId) === index && !itemGroupIds.has(itemId),
+    );
+
+    if (itemIds.length < 2) {
+      continue;
+    }
+
+    for (const itemId of itemIds) {
+      itemGroupIds.set(itemId, group.id);
+    }
+
+    normalizedGroups.push({ ...group, itemIds });
+  }
+
+  return {
+    furniture: furniture.map((item) => {
+      const groupId = itemGroupIds.get(item.id);
+
+      if (groupId) {
+        return item.groupId === groupId ? item : { ...item, groupId };
+      }
+
+      if (!item.groupId) {
+        return item;
+      }
+
+      const itemWithoutGroup = { ...item };
+      delete itemWithoutGroup.groupId;
+      return itemWithoutGroup;
+    }),
+    groups: normalizedGroups,
+  };
+}
+
+function uniqueById<T extends { id: string }>(items: T[], rejectDuplicates: boolean): T[] | null {
+  const seen = new Set<string>();
+  const uniqueItems: T[] = [];
+
+  for (const item of items) {
+    if (seen.has(item.id)) {
+      if (rejectDuplicates) {
+        return null;
+      }
+
+      continue;
+    }
+
+    seen.add(item.id);
+    uniqueItems.push(item);
+  }
+
+  return uniqueItems;
+}
+
+function normalizePoint(value: unknown): Point | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const x = normalizeFiniteNumber(value.x);
+  const y = normalizeFiniteNumber(value.y);
+
+  if (x === null || y === null) {
+    return null;
+  }
+
+  return {
+    x: Math.round(x),
+    y: Math.round(y),
+  };
+}
+
+function normalizeString(
+  value: unknown,
+  options: { allowEmpty: boolean; maxLength: number },
+): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+
+  if (!options.allowEmpty && !trimmed) {
+    return null;
+  }
+
+  if (trimmed.length > options.maxLength) {
+    return null;
+  }
+
+  return trimmed;
+}
+
+function normalizeFiniteNumber(value: unknown): number | null {
+  const numeric = Number(value);
+
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function normalizeRotationValue(value: number) {
+  return Math.round(((value % 360) + 360) % 360);
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 export function serializeScene(scene: RoomScene): string {
@@ -220,7 +499,7 @@ export function safeDimension(value: unknown, fallback: number): number {
 export function safeVersion(value: unknown): number | null {
   const numeric = Number(value);
 
-  if (!Number.isInteger(numeric) || numeric < 1) {
+  if (!Number.isInteger(numeric) || numeric < 1 || numeric > MAX_PRISMA_INT) {
     return null;
   }
 

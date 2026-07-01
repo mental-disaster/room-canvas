@@ -846,7 +846,14 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   }
 
   function handleDragStart(item: FurnitureItem) {
-    const ids = selectedIds.includes(item.id) ? selectedIds : [item.id];
+    const group = item.groupId ? scene.groups.find((candidate) => candidate.id === item.groupId) : null;
+    const groupIds = group ? group.itemIds : [item.id];
+    const ids = selectedIds.includes(item.id) ? selectedIds : groupIds;
+
+    if (!selectedIds.includes(item.id) && group) {
+      setSelectedIds(groupIds);
+    }
+
     dragStartRef.current = {
       itemId: item.id,
       ids,
