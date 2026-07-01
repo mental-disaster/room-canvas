@@ -56,7 +56,22 @@ export type RoomPayload = {
   width: number;
   height: number;
   scene: RoomScene;
+  version: number;
+  versionName: string;
+  versionMemo: string | null;
+  latestVersion: number;
   updatedAt: string;
+};
+
+export type RoomVersionSummary = {
+  version: number;
+  name: string;
+  memo: string | null;
+  width: number;
+  height: number;
+  createdAt: string;
+  updatedAt: string;
+  isLatest: boolean;
 };
 
 export function createEmptyScene(width: number, height: number): RoomScene {
@@ -111,6 +126,60 @@ export function serializeScene(scene: RoomScene): string {
   });
 }
 
+export function toRoomPayload(
+  room: {
+    shareId: string;
+    name: string | null;
+    latestVersion: number;
+  },
+  version: {
+    version: number;
+    name: string;
+    memo: string | null;
+    width: number;
+    height: number;
+    scene: string;
+    updatedAt: Date;
+  },
+): RoomPayload {
+  return {
+    shareId: room.shareId,
+    name: room.name,
+    width: version.width,
+    height: version.height,
+    scene: parseScene(version.scene, version.width, version.height),
+    version: version.version,
+    versionName: version.name,
+    versionMemo: version.memo,
+    latestVersion: room.latestVersion,
+    updatedAt: version.updatedAt.toISOString(),
+  };
+}
+
+export function toRoomVersionSummary(
+  version: {
+    version: number;
+    name: string;
+    memo: string | null;
+    width: number;
+    height: number;
+    createdAt: Date;
+    updatedAt: Date;
+  },
+  latestVersion: number,
+): RoomVersionSummary {
+  return {
+    version: version.version,
+    name: version.name,
+    memo: version.memo,
+    width: version.width,
+    height: version.height,
+    createdAt: version.createdAt.toISOString(),
+    updatedAt: version.updatedAt.toISOString(),
+    isLatest: version.version === latestVersion,
+  };
+}
+
 export function safeDimension(value: unknown, fallback: number): number {
   const numeric = Number(value);
 
@@ -119,6 +188,52 @@ export function safeDimension(value: unknown, fallback: number): number {
   }
 
   return Math.min(8000, Math.max(100, Math.round(numeric)));
+}
+
+export function safeVersion(value: unknown): number | null {
+  const numeric = Number(value);
+
+  if (!Number.isInteger(numeric) || numeric < 1) {
+    return null;
+  }
+
+  return numeric;
+}
+
+export function normalizeVersionName(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+
+  if (!trimmed || trimmed.length > 60) {
+    return null;
+  }
+
+  return trimmed;
+}
+
+export function normalizeVersionMemo(value: unknown): string | null | undefined {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+
+  if (!trimmed) {
+    return null;
+  }
+
+  if (trimmed.length > 500) {
+    return undefined;
+  }
+
+  return trimmed;
 }
 
 function safeGridSize(value: unknown): number {
