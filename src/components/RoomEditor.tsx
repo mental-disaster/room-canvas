@@ -26,6 +26,7 @@ import {
   Plus,
   Redo2,
   Save,
+  Settings,
   Square,
   Trash2,
   Ungroup,
@@ -51,6 +52,7 @@ type Tool = "select" | "pan" | "wall-line" | "wall-freehand" | "rect" | "circle"
 type SaveState = "idle" | "saving" | "saved" | "error";
 type VersionListState = "idle" | "loading" | "error";
 type VersionActionState = "idle" | "creating" | "switching" | "updating";
+type MobilePanelTab = "canvas" | "blueprint" | "selection";
 type HistoryState = {
   past: RoomScene[];
   future: RoomScene[];
@@ -69,6 +71,12 @@ type PanStart = {
   offset: Point;
   hasMoved: boolean;
   clearSelectionOnClick: boolean;
+};
+type PinchStart = {
+  distance: number;
+  center: Point;
+  zoom: number;
+  offset: Point;
 };
 
 const FURNITURE_COLORS = ["#d8eef2", "#f7d7cc", "#e9e1f5", "#dfead2", "#f3e2b8", "#dce3ee"];
@@ -109,6 +117,8 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   const [isVersionPanelOpen, setIsVersionPanelOpen] = useState(false);
   const [versionListState, setVersionListState] = useState<VersionListState>("idle");
   const [versionActionState, setVersionActionState] = useState<VersionActionState>("idle");
+  const [isMobilePanelOpen, setIsMobilePanelOpen] = useState(false);
+  const [mobilePanelTab, setMobilePanelTab] = useState<MobilePanelTab>("canvas");
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<Konva.Stage>(null);
@@ -139,6 +149,8 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
     positions: Record<string, Point>;
   } | null>(null);
   const panStartRef = useRef<PanStart | null>(null);
+  const activePointersRef = useRef<Map<number, Point>>(new Map());
+  const pinchStartRef = useRef<PinchStart | null>(null);
 
   const selectedItems = useMemo(
     () => scene.furniture.filter((item) => selectedIds.includes(item.id)),
@@ -250,10 +262,21 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
       return;
     }
 
+    const isMobileViewport = viewport.clientWidth < 1024;
+    const nextZoom = isMobileViewport
+      ? calculateFitZoom(targetScene, viewport.clientWidth, viewport.clientHeight)
+      : targetZoom;
+
+    zoomRef.current = nextZoom;
+    setZoom(nextZoom);
     setCanvasOffset({
-      x: Math.round((viewport.clientWidth - targetScene.canvas.width * targetZoom) / 2),
-      y: Math.round((viewport.clientHeight - targetScene.canvas.height * targetZoom) / 2),
+      x: Math.round((viewport.clientWidth - targetScene.canvas.width * nextZoom) / 2),
+      y: Math.round((viewport.clientHeight - targetScene.canvas.height * nextZoom) / 2),
     });
+  }
+
+  function fitCanvasToViewport() {
+    centerCanvasInViewport(scene);
   }
 
   function applyRoomPayload(payload: RoomPayload, options: { centerCanvas?: boolean } = {}) {
@@ -282,6 +305,11 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   function openVersionPanel() {
     setIsVersionPanelOpen(true);
     void loadVersions();
+  }
+
+  function openMobilePanel(tab: MobilePanelTab) {
+    setMobilePanelTab(tab);
+    setIsMobilePanelOpen(true);
   }
 
   useEffect(() => {
@@ -553,6 +581,13 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
     if (tool === "select") {
       event.evt.preventDefault();
       event.evt.stopPropagation();
+      updateActivePointer(event.evt.pointerId, event.evt.clientX, event.evt.clientY);
+
+      if (activePointersRef.current.size >= 2) {
+        startPinchIfReady();
+        return;
+      }
+
       beginCanvasPan(event.evt.pointerId, event.evt.clientX, event.evt.clientY, true);
       return;
     }
@@ -579,7 +614,13 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
     }
   }
 
-  function handleStagePointerMove() {
+  function handleStagePointerMove(event: Konva.KonvaEventObject<PointerEvent>) {
+    if (pinchStartRef.current) {
+      updateActivePointer(event.evt.pointerId, event.evt.clientX, event.evt.clientY);
+      updatePinchGesture();
+      return;
+    }
+
     if (panStartRef.current) {
       return;
     }
@@ -617,7 +658,13 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
     });
   }
 
-  function handleStagePointerUp() {
+  function handleStagePointerUp(event: Konva.KonvaEventObject<PointerEvent>) {
+    removeActivePointer(event.evt.pointerId);
+
+    if (pinchStartRef.current) {
+      return;
+    }
+
     if (panStartRef.current) {
       return;
     }
@@ -1090,6 +1137,90 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
     });
   }
 
+  function updateActivePointer(pointerId: number, clientX: number, clientY: number) {
+    const point = viewportPointFromClient(clientX, clientY);
+
+    if (!point) {
+      return;
+    }
+
+    activePointersRef.current.set(pointerId, point);
+  }
+
+  function removeActivePointer(pointerId: number) {
+    activePointersRef.current.delete(pointerId);
+
+    if (activePointersRef.current.size < 2) {
+      pinchStartRef.current = null;
+    }
+  }
+
+  function getPrimaryTouchPair(): [Point, Point] | null {
+    const points = Array.from(activePointersRef.current.values());
+
+    if (points.length < 2) {
+      return null;
+    }
+
+    return [points[0], points[1]];
+  }
+
+  function startPinchIfReady() {
+    const pair = getPrimaryTouchPair();
+
+    if (!pair) {
+      return false;
+    }
+
+    const [first, second] = pair;
+    const center = midpoint(first, second);
+    const distanceBetweenPointers = distance(first, second);
+
+    if (distanceBetweenPointers <= 0) {
+      return false;
+    }
+
+    clearInProgressDrawing();
+    panStartRef.current = null;
+    pinchStartRef.current = {
+      distance: distanceBetweenPointers,
+      center,
+      zoom: zoomRef.current,
+      offset: canvasOffsetRef.current,
+    };
+
+    return true;
+  }
+
+  function updatePinchGesture() {
+    const pinchStart = pinchStartRef.current;
+    const pair = getPrimaryTouchPair();
+
+    if (!pinchStart || !pair) {
+      return false;
+    }
+
+    const [first, second] = pair;
+    const center = midpoint(first, second);
+    const nextZoom = clamp(
+      pinchStart.zoom * (distance(first, second) / pinchStart.distance),
+      0.25,
+      3,
+    );
+    const anchorX = (pinchStart.center.x - pinchStart.offset.x) / pinchStart.zoom;
+    const anchorY = (pinchStart.center.y - pinchStart.offset.y) / pinchStart.zoom;
+    const nextOffset = {
+      x: center.x - anchorX * nextZoom,
+      y: center.y - anchorY * nextZoom,
+    };
+
+    zoomRef.current = nextZoom;
+    canvasOffsetRef.current = nextOffset;
+    setZoom(nextZoom);
+    setCanvasOffsetState(nextOffset);
+    return true;
+  }
+
   function beginCanvasPan(
     pointerId: number,
     clientX: number,
@@ -1127,6 +1258,14 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
       return;
     }
 
+    updateActivePointer(event.pointerId, event.clientX, event.clientY);
+
+    if (activePointersRef.current.size >= 2) {
+      event.preventDefault();
+      startPinchIfReady();
+      return;
+    }
+
     const stageShell = viewport.querySelector(".stage-shell");
     const target = event.target;
     const isInsideStage = target instanceof Node && stageShell?.contains(target);
@@ -1141,6 +1280,14 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   }
 
   function handleViewportPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    updateActivePointer(event.pointerId, event.clientX, event.clientY);
+
+    if (pinchStartRef.current) {
+      event.preventDefault();
+      updatePinchGesture();
+      return;
+    }
+
     const panStart = panStartRef.current;
 
     if (!panStart || panStart.pointerId !== event.pointerId) {
@@ -1170,6 +1317,8 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   function handleViewportPointerUp(event: ReactPointerEvent<HTMLDivElement>) {
     const panStart = panStartRef.current;
     const viewport = viewportRef.current;
+
+    removeActivePointer(event.pointerId);
 
     if (!panStart || !viewport || panStart.pointerId !== event.pointerId) {
       return;
@@ -1365,18 +1514,217 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
     };
   }, []);
 
+  function renderCanvasControls() {
+    return (
+      <section className="grid gap-3">
+        <PanelTitle title="캔버스" />
+        <div className="grid grid-cols-2 gap-3">
+          <NumberField
+            label="Width"
+            value={scene.canvas.width}
+            min={100}
+            max={8000}
+            onChange={(value) => updateCanvas({ width: value })}
+          />
+          <NumberField
+            label="Height"
+            value={scene.canvas.height}
+            min={100}
+            max={8000}
+            onChange={(value) => updateCanvas({ height: value })}
+          />
+        </div>
+        <div className="grid grid-cols-[1fr_auto] items-end gap-3">
+          <NumberField
+            label="Grid"
+            value={scene.canvas.gridSize}
+            min={2}
+            max={200}
+            onChange={(value) => updateCanvas({ gridSize: value })}
+          />
+          <label className="flex h-10 items-center gap-2 rounded-md border border-[#cbd2dc] px-3 text-sm">
+            <input
+              type="checkbox"
+              checked={scene.canvas.snapToGrid}
+              onChange={(event) => updateCanvas({ snapToGrid: event.target.checked })}
+            />
+            Snap
+          </label>
+        </div>
+        <div className="flex items-center gap-2">
+          <IconButton title="축소" onClick={() => nudgeZoom(-10)}>
+            <Minus size={18} aria-hidden />
+          </IconButton>
+          <div className="w-24">
+            <NumberField
+              label="Zoom %"
+              value={zoomPercent}
+              min={25}
+              max={300}
+              onChange={setZoomPercent}
+            />
+          </div>
+          <IconButton title="확대" onClick={() => nudgeZoom(10)}>
+            <Plus size={18} aria-hidden />
+          </IconButton>
+          <button className="small-button ml-auto" type="button" onClick={fitCanvasToViewport}>
+            맞춤
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  function renderWallControls() {
+    return (
+      <section className="grid gap-3">
+        <PanelTitle title="벽" />
+        <NumberField
+          label="Stroke px"
+          value={wallStrokeWidth}
+          min={1}
+          max={40}
+          onChange={setWallStrokeWidth}
+        />
+      </section>
+    );
+  }
+
+  function renderBlueprintControls() {
+    return (
+      <section className="grid gap-3">
+        <PanelTitle title="도면" />
+        <label className="command-button justify-center">
+          <ImagePlus size={16} aria-hidden />
+          이미지 선택
+          <input
+            type="file"
+            accept="image/*"
+            className="sr-only"
+            onChange={(event) => handleBlueprintUpload(event.target.files?.[0] ?? null)}
+          />
+        </label>
+        {blueprintImage ? (
+          <>
+            <label className="flex h-10 items-center gap-2 rounded-md border border-[#cbd2dc] px-3 text-sm">
+              <input
+                type="checkbox"
+                checked={isBlueprintEditing}
+                onChange={(event) => {
+                  setIsBlueprintEditing(event.target.checked);
+                  setSelectedIds([]);
+                  setTool("select");
+                }}
+              />
+              도면 조정
+            </label>
+            <div className="grid grid-cols-2 gap-3">
+              <NumberField
+                label="X"
+                value={blueprintPlacement.x}
+                min={-8000}
+                max={8000}
+                onChange={(value) => updateBlueprintPlacement({ x: value })}
+              />
+              <NumberField
+                label="Y"
+                value={blueprintPlacement.y}
+                min={-8000}
+                max={8000}
+                onChange={(value) => updateBlueprintPlacement({ y: value })}
+              />
+              <NumberField
+                label="Width"
+                value={blueprintPlacement.width}
+                min={10}
+                max={16000}
+                onChange={(value) => updateBlueprintPlacement({ width: value })}
+              />
+              <NumberField
+                label="Height"
+                value={blueprintPlacement.height}
+                min={10}
+                max={16000}
+                onChange={(value) => updateBlueprintPlacement({ height: value })}
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <button className="small-button justify-center" type="button" onClick={fitBlueprintToCanvas}>
+                캔버스 맞춤
+              </button>
+              <button className="small-button justify-center" type="button" onClick={fitBlueprintWithRatio}>
+                비율 맞춤
+              </button>
+            </div>
+            <label className="grid gap-2 text-sm font-medium text-[#252a31]">
+              Opacity
+              <input
+                type="range"
+                min={0.05}
+                max={1}
+                step={0.05}
+                value={blueprintOpacity}
+                onChange={(event) => setBlueprintOpacity(Number(event.target.value))}
+              />
+            </label>
+            <button
+              className="small-button"
+              type="button"
+              onClick={() => {
+                if (blueprintUrl) {
+                  URL.revokeObjectURL(blueprintUrl);
+                }
+
+                setBlueprintUrl(null);
+                setBlueprintImage(null);
+                setIsBlueprintEditing(false);
+              }}
+            >
+              제거
+            </button>
+          </>
+        ) : null}
+      </section>
+    );
+  }
+
+  function renderSelectionControls() {
+    return (
+      <section className="grid gap-3">
+        <PanelTitle title="선택" />
+        {selectedItem ? (
+          <SelectedItemInspector item={selectedItem} onUpdate={updateItem} />
+        ) : selectedItems.length > 1 ? (
+          <p className="text-sm text-[#59616d]">{selectedItems.length}개 선택됨</p>
+        ) : (
+          <p className="text-sm text-[#59616d]">선택된 가구 없음</p>
+        )}
+        <div className="grid grid-cols-2 gap-2">
+          <button className="command-button justify-center" type="button" onClick={groupSelected} disabled={selectedIds.length < 2}>
+            <Group size={16} aria-hidden />
+            그룹
+          </button>
+          <button className="command-button justify-center" type="button" onClick={ungroupSelected} disabled={selectedGroups.length === 0}>
+            <Ungroup size={16} aria-hidden />
+            해제
+          </button>
+        </div>
+      </section>
+    );
+  }
+
   return (
     <div className="flex h-dvh overflow-hidden flex-col bg-[#f5f6f8] text-[#15181c]">
-      <header className="flex min-h-14 shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[#d9dee7] bg-white px-4 py-2">
+      <header className="flex min-h-14 shrink-0 items-center justify-between gap-2 border-b border-[#d9dee7] bg-white px-3 py-2 sm:px-4">
         <div className="min-w-0">
           <h1 className="truncate text-base font-semibold">{initialRoom.name ?? "Room Canvas"}</h1>
-          <p className="text-xs text-[#66707d]">
+          <p className="truncate text-xs text-[#66707d]">
             v{currentVersion} · {scene.canvas.width}px x {scene.canvas.height}px · 저장 {formatDate(updatedAt)}
           </p>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           <button
-            className="command-button max-w-[12rem]"
+            className="command-button max-w-[8.5rem] px-2 sm:max-w-[12rem] sm:px-3"
             type="button"
             onClick={openVersionPanel}
             title={versionMemo ? `${versionName} - ${versionMemo}` : versionName}
@@ -1386,11 +1734,13 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
           </button>
           <button className="command-button" type="button" onClick={copyShareLink}>
             <Copy size={16} aria-hidden />
-            링크 복사
+            <span className="hidden sm:inline">링크 복사</span>
           </button>
           <button className="primary-button" type="button" onClick={saveRoom} disabled={saveState === "saving"}>
             {saveState === "saved" ? <Check size={16} aria-hidden /> : <Save size={16} aria-hidden />}
-            {saveState === "saving" ? "저장 중" : saveState === "saved" ? "저장됨" : "저장"}
+            <span className="hidden sm:inline">
+              {saveState === "saving" ? "저장 중" : saveState === "saved" ? "저장됨" : "저장"}
+            </span>
           </button>
         </div>
       </header>
@@ -1411,8 +1761,8 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
         />
       ) : null}
 
-      <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[auto_minmax(0,1fr)_minmax(0,18rem)] lg:grid-cols-[64px_minmax(0,1fr)_300px] lg:grid-rows-1">
-        <aside className="flex min-h-0 gap-2 overflow-x-auto overflow-y-hidden border-b border-[#d9dee7] bg-white p-2 lg:flex-col lg:overflow-x-hidden lg:overflow-y-auto lg:border-b-0 lg:border-r">
+      <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[64px_minmax(0,1fr)_300px]">
+        <aside className="hidden min-h-0 gap-2 overflow-x-hidden overflow-y-auto border-r border-[#d9dee7] bg-white p-2 lg:flex lg:flex-col">
           <IconButton active={tool === "select"} title="선택" onClick={() => setActiveTool("select")}>
             <MousePointer2 size={19} aria-hidden />
           </IconButton>
@@ -1631,9 +1981,54 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
               </Stage>
             </div>
           </div>
+
+          <div className="pointer-events-none absolute left-3 top-3 z-10 flex items-center gap-2 lg:hidden">
+            <span className="rounded-md border border-[#cbd2dc] bg-white/95 px-2 py-1 text-xs font-semibold text-[#303742] shadow-sm">
+              {zoomPercent}%
+            </span>
+            <button
+              className="pointer-events-auto rounded-md border border-[#cbd2dc] bg-white/95 px-3 py-1 text-xs font-semibold text-[#303742] shadow-sm"
+              type="button"
+              onClick={fitCanvasToViewport}
+            >
+              맞춤
+            </button>
+          </div>
+
+          <div className="absolute inset-x-3 bottom-3 z-10 lg:hidden">
+            <div className="flex gap-2 overflow-x-auto rounded-md border border-[#cbd2dc] bg-white/95 p-2 shadow-lg">
+              <MobileToolButton active={tool === "select"} title="선택" onClick={() => setActiveTool("select")}>
+                <MousePointer2 size={19} aria-hidden />
+              </MobileToolButton>
+              <MobileToolButton active={tool === "pan"} title="이동" onClick={() => setActiveTool("pan")}>
+                <Hand size={19} aria-hidden />
+              </MobileToolButton>
+              <MobileToolButton active={tool === "wall-line"} title="직선 벽" onClick={() => setActiveTool("wall-line")}>
+                <Waypoints size={19} aria-hidden />
+              </MobileToolButton>
+              <MobileToolButton active={tool === "wall-freehand"} title="프리드로우 벽" onClick={() => setActiveTool("wall-freehand")}>
+                <Pencil size={19} aria-hidden />
+              </MobileToolButton>
+              <MobileToolButton active={tool === "rect"} title="사각형 가구" onClick={() => setActiveTool("rect")}>
+                <Square size={19} aria-hidden />
+              </MobileToolButton>
+              <MobileToolButton active={tool === "circle"} title="원형 가구" onClick={() => setActiveTool("circle")}>
+                <CircleIcon size={19} aria-hidden />
+              </MobileToolButton>
+              <MobileToolButton title="되돌리기" disabled={history.past.length === 0} onClick={undo}>
+                <Undo2 size={19} aria-hidden />
+              </MobileToolButton>
+              <MobileToolButton title="저장" disabled={saveState === "saving"} onClick={saveRoom}>
+                {saveState === "saved" ? <Check size={19} aria-hidden /> : <Save size={19} aria-hidden />}
+              </MobileToolButton>
+              <MobileToolButton title="설정" onClick={() => openMobilePanel("canvas")}>
+                <Settings size={19} aria-hidden />
+              </MobileToolButton>
+            </div>
+          </div>
         </main>
 
-        <aside className="min-h-0 overflow-y-auto border-t border-[#d9dee7] bg-white p-4 lg:border-l lg:border-t-0">
+        <aside className="hidden min-h-0 overflow-y-auto border-l border-[#d9dee7] bg-white p-4 lg:block">
           <div className="grid gap-6">
             <section className="grid gap-3">
               <PanelTitle title="캔버스" />
@@ -1817,6 +2212,57 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
           </div>
         </aside>
       </div>
+
+      {isMobilePanelOpen ? (
+        <div className="fixed inset-0 z-40 lg:hidden">
+          <button
+            className="absolute inset-0 bg-[#15181c]/35"
+            type="button"
+            aria-label="설정 닫기"
+            onClick={() => setIsMobilePanelOpen(false)}
+          />
+          <section className="absolute inset-x-0 bottom-0 max-h-[72dvh] rounded-t-lg bg-white shadow-xl">
+            <div className="flex items-center justify-between border-b border-[#d9dee7] px-4 py-3">
+              <div>
+                <h2 className="text-base font-semibold text-[#15181c]">설정</h2>
+                <p className="text-xs text-[#66707d]">캔버스는 시트 밖에서 계속 조작할 수 있습니다.</p>
+              </div>
+              <IconButton title="닫기" onClick={() => setIsMobilePanelOpen(false)}>
+                <X size={18} aria-hidden />
+              </IconButton>
+            </div>
+            <div className="grid grid-cols-3 border-b border-[#d9dee7] p-2">
+              <MobileTabButton
+                active={mobilePanelTab === "canvas"}
+                label="캔버스"
+                onClick={() => setMobilePanelTab("canvas")}
+              />
+              <MobileTabButton
+                active={mobilePanelTab === "blueprint"}
+                label="도면"
+                onClick={() => setMobilePanelTab("blueprint")}
+              />
+              <MobileTabButton
+                active={mobilePanelTab === "selection"}
+                label="선택"
+                onClick={() => setMobilePanelTab("selection")}
+              />
+            </div>
+            <div className="max-h-[calc(72dvh-7.5rem)] overflow-y-auto p-4">
+              <div className="grid gap-6">
+                {mobilePanelTab === "canvas" ? (
+                  <>
+                    {renderCanvasControls()}
+                    {renderWallControls()}
+                  </>
+                ) : null}
+                {mobilePanelTab === "blueprint" ? renderBlueprintControls() : null}
+                {mobilePanelTab === "selection" ? renderSelectionControls() : null}
+              </div>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -2208,6 +2654,59 @@ function IconButton({
   );
 }
 
+function MobileToolButton({
+  active = false,
+  title,
+  disabled = false,
+  children,
+  onClick,
+}: {
+  active?: boolean;
+  title: string;
+  disabled?: boolean;
+  children: ReactNode;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      disabled={disabled}
+      onClick={onClick}
+      className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-md border text-sm transition ${
+        active
+          ? "border-[#1c4f8f] bg-[#e7f0fb] text-[#143a66]"
+          : "border-[#cbd2dc] bg-white text-[#303742] active:bg-[#f2f4f7]"
+      } disabled:cursor-not-allowed disabled:border-[#e4e8ee] disabled:text-[#a6afbb]`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function MobileTabButton({
+  active,
+  label,
+  onClick,
+}: {
+  active: boolean;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`h-10 rounded-md text-sm font-semibold transition ${
+        active ? "bg-[#e7f0fb] text-[#143a66]" : "text-[#59616d] active:bg-[#f2f4f7]"
+      }`}
+    >
+      {label}
+    </button>
+  );
+}
+
 function flattenPoints(points: Point[]) {
   return points.flatMap((point) => [point.x, point.y]);
 }
@@ -2262,6 +2761,24 @@ function setNodeTopLeft(node: Konva.Node, point: Point) {
 
 function distance(first: Point, second: Point) {
   return Math.hypot(second.x - first.x, second.y - first.y);
+}
+
+function midpoint(first: Point, second: Point): Point {
+  return {
+    x: (first.x + second.x) / 2,
+    y: (first.y + second.y) / 2,
+  };
+}
+
+function calculateFitZoom(scene: RoomScene, viewportWidth: number, viewportHeight: number) {
+  const availableWidth = Math.max(100, viewportWidth - 24);
+  const availableHeight = Math.max(100, viewportHeight - 120);
+  const fitZoom = Math.min(
+    availableWidth / scene.canvas.width,
+    availableHeight / scene.canvas.height,
+  );
+
+  return clamp(fitZoom, 0.25, 1);
 }
 
 function fitInsideCanvas(imageWidth: number, imageHeight: number, canvasWidth: number, canvasHeight: number): BlueprintPlacement {
