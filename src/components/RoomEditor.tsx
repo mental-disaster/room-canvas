@@ -1997,33 +1997,60 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
 
           <div className="absolute inset-x-3 bottom-3 z-10 lg:hidden">
             <div className="flex gap-2 overflow-x-auto rounded-md border border-[#cbd2dc] bg-white/95 p-2 shadow-lg">
-              <MobileToolButton active={tool === "select"} title="선택" onClick={() => setActiveTool("select")}>
-                <MousePointer2 size={19} aria-hidden />
-              </MobileToolButton>
-              <MobileToolButton active={tool === "pan"} title="이동" onClick={() => setActiveTool("pan")}>
-                <Hand size={19} aria-hidden />
-              </MobileToolButton>
-              <MobileToolButton active={tool === "wall-line"} title="직선 벽" onClick={() => setActiveTool("wall-line")}>
-                <Waypoints size={19} aria-hidden />
-              </MobileToolButton>
-              <MobileToolButton active={tool === "wall-freehand"} title="프리드로우 벽" onClick={() => setActiveTool("wall-freehand")}>
-                <Pencil size={19} aria-hidden />
-              </MobileToolButton>
-              <MobileToolButton active={tool === "rect"} title="사각형 가구" onClick={() => setActiveTool("rect")}>
-                <Square size={19} aria-hidden />
-              </MobileToolButton>
-              <MobileToolButton active={tool === "circle"} title="원형 가구" onClick={() => setActiveTool("circle")}>
-                <CircleIcon size={19} aria-hidden />
-              </MobileToolButton>
-              <MobileToolButton title="되돌리기" disabled={history.past.length === 0} onClick={undo}>
-                <Undo2 size={19} aria-hidden />
-              </MobileToolButton>
-              <MobileToolButton title="저장" disabled={saveState === "saving"} onClick={saveRoom}>
-                {saveState === "saved" ? <Check size={19} aria-hidden /> : <Save size={19} aria-hidden />}
-              </MobileToolButton>
-              <MobileToolButton title="설정" onClick={() => openMobilePanel("canvas")}>
-                <Settings size={19} aria-hidden />
-              </MobileToolButton>
+              {selectedIds.length > 0 ? (
+                <>
+                  <div className="flex h-11 min-w-[8.5rem] shrink-0 items-center rounded-md border border-[#cbd2dc] bg-[#f8fafc] px-3">
+                    <span className="truncate text-sm font-semibold text-[#252a31]">
+                      {selectedItem ? selectedItem.label : `${selectedIds.length}개 선택`}
+                    </span>
+                  </div>
+                  <MobileToolButton title="선택 설정" onClick={() => openMobilePanel("selection")}>
+                    <Settings size={19} aria-hidden />
+                  </MobileToolButton>
+                  <MobileToolButton title="그룹" disabled={selectedIds.length < 2} onClick={groupSelected}>
+                    <Group size={19} aria-hidden />
+                  </MobileToolButton>
+                  <MobileToolButton title="그룹 해제" disabled={selectedGroups.length === 0} onClick={ungroupSelected}>
+                    <Ungroup size={19} aria-hidden />
+                  </MobileToolButton>
+                  <MobileToolButton title="삭제" onClick={deleteSelected}>
+                    <Trash2 size={19} aria-hidden />
+                  </MobileToolButton>
+                  <MobileToolButton title="선택 해제" onClick={() => setSelectedIds([])}>
+                    <X size={19} aria-hidden />
+                  </MobileToolButton>
+                </>
+              ) : (
+                <>
+                  <MobileToolButton active={tool === "select"} title="선택" onClick={() => setActiveTool("select")}>
+                    <MousePointer2 size={19} aria-hidden />
+                  </MobileToolButton>
+                  <MobileToolButton active={tool === "pan"} title="이동" onClick={() => setActiveTool("pan")}>
+                    <Hand size={19} aria-hidden />
+                  </MobileToolButton>
+                  <MobileToolButton active={tool === "wall-line"} title="직선 벽" onClick={() => setActiveTool("wall-line")}>
+                    <Waypoints size={19} aria-hidden />
+                  </MobileToolButton>
+                  <MobileToolButton active={tool === "wall-freehand"} title="프리드로우 벽" onClick={() => setActiveTool("wall-freehand")}>
+                    <Pencil size={19} aria-hidden />
+                  </MobileToolButton>
+                  <MobileToolButton active={tool === "rect"} title="사각형 가구" onClick={() => setActiveTool("rect")}>
+                    <Square size={19} aria-hidden />
+                  </MobileToolButton>
+                  <MobileToolButton active={tool === "circle"} title="원형 가구" onClick={() => setActiveTool("circle")}>
+                    <CircleIcon size={19} aria-hidden />
+                  </MobileToolButton>
+                  <MobileToolButton title="되돌리기" disabled={history.past.length === 0} onClick={undo}>
+                    <Undo2 size={19} aria-hidden />
+                  </MobileToolButton>
+                  <MobileToolButton title="저장" disabled={saveState === "saving"} onClick={saveRoom}>
+                    {saveState === "saved" ? <Check size={19} aria-hidden /> : <Save size={19} aria-hidden />}
+                  </MobileToolButton>
+                  <MobileToolButton title="설정" onClick={() => openMobilePanel("canvas")}>
+                    <Settings size={19} aria-hidden />
+                  </MobileToolButton>
+                </>
+              )}
             </div>
           </div>
         </main>
