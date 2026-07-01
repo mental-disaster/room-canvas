@@ -1,6 +1,10 @@
 "use client";
 
-import type Konva from "konva";
+import Konva from "konva";
+import type { Node as KonvaNode } from "konva/lib/Node";
+import type { Stage as KonvaStage } from "konva/lib/Stage";
+import type { Image as KonvaImageNode } from "konva/lib/shapes/Image";
+import type { Transformer as KonvaTransformer } from "konva/lib/shapes/Transformer";
 import {
   Circle,
   Group as KonvaGroup,
@@ -16,6 +20,7 @@ import {
   Check,
   CircleIcon,
   Copy,
+  Download,
   Group,
   Hand,
   History,
@@ -58,6 +63,7 @@ import type {
 
 type Tool = "select" | "pan" | "wall-line" | "wall-freehand" | "rect" | "circle";
 type SaveState = "idle" | "saving" | "saved" | "error";
+type ExportState = "idle" | "exporting" | "error";
 type VersionListState = "idle" | "loading" | "error";
 type VersionActionState = "idle" | "creating" | "switching" | "updating";
 type MobilePanelTab = "canvas" | "blueprint" | "selection";
@@ -91,6 +97,8 @@ const FURNITURE_COLORS = ["#d8eef2", "#f7d7cc", "#e9e1f5", "#dfead2", "#f3e2b8",
 const WALL_COLOR = "#26313f";
 const MIN_SHAPE_SIZE = 20;
 const MAX_GRID_LINES = 900;
+const EXPORT_MAX_LONG_EDGE = 4096;
+const EXPORT_MAX_PIXEL_RATIO = 2;
 
 export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   const [scene, setScene] = useState(initialRoom.scene);
@@ -117,6 +125,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   const [blueprintOpacity, setBlueprintOpacity] = useState(0.45);
   const [isBlueprintEditing, setIsBlueprintEditing] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("saved");
+  const [exportState, setExportState] = useState<ExportState>("idle");
   const [updatedAt, setUpdatedAt] = useState(initialRoom.updatedAt);
   const [currentVersion, setCurrentVersion] = useState(initialRoom.version);
   const [latestVersion, setLatestVersion] = useState(initialRoom.latestVersion);
@@ -130,7 +139,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   const [mobilePanelTab, setMobilePanelTab] = useState<MobilePanelTab>("canvas");
 
   const viewportRef = useRef<HTMLDivElement>(null);
-  const stageRef = useRef<Konva.Stage>(null);
+  const stageRef = useRef<KonvaStage>(null);
   const sceneRef = useRef(initialRoom.scene);
   const historyRef = useRef<HistoryState>({ past: [], future: [] });
   const canvasSizeRef = useRef({
@@ -150,10 +159,10 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   const wallStrokeWidthRef = useRef(3);
   const gridSizeRef = useRef(initialRoom.scene.canvas.gridSize);
   const snapToGridRef = useRef(initialRoom.scene.canvas.snapToGrid);
-  const transformerRef = useRef<Konva.Transformer>(null);
-  const blueprintRef = useRef<Konva.Image>(null);
-  const blueprintTransformerRef = useRef<Konva.Transformer>(null);
-  const shapeRefs = useRef<Record<string, Konva.Node | null>>({});
+  const transformerRef = useRef<KonvaTransformer>(null);
+  const blueprintRef = useRef<KonvaImageNode>(null);
+  const blueprintTransformerRef = useRef<KonvaTransformer>(null);
+  const shapeRefs = useRef<Record<string, KonvaNode | null>>({});
   const dragStartRef = useRef<{
     itemId: string;
     ids: string[];
@@ -453,7 +462,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
 
     const nodes = selectedIds
       .map((id) => shapeRefs.current[id])
-      .filter((node): node is Konva.Node => Boolean(node));
+      .filter((node): node is KonvaNode => Boolean(node));
 
     transformer.nodes(nodes);
     transformer.getLayer()?.batchDraw();
@@ -1184,6 +1193,29 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
     await navigator.clipboard.writeText(window.location.href);
   }
 
+  async function exportRoomImage() {
+    if (exportState === "exporting") {
+      return;
+    }
+
+    setExportState("exporting");
+
+    try {
+      const blob = await createRoomImageBlob({
+        scene,
+        blueprintImage,
+        blueprintPlacement,
+        blueprintOpacity,
+      });
+      const filename = createExportFileName(initialRoom.name, currentVersion);
+
+      downloadBlob(blob, filename);
+      setExportState("idle");
+    } catch {
+      setExportState("error");
+    }
+  }
+
   function handleBlueprintUpload(file: File | null) {
     if (!file) {
       return;
@@ -1841,6 +1873,17 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
             <Copy size={16} aria-hidden />
             <span className="hidden sm:inline">링크 복사</span>
           </button>
+          <div className="hidden lg:block">
+            <button
+              className="command-button"
+              type="button"
+              onClick={() => void exportRoomImage()}
+              disabled={exportState === "exporting"}
+            >
+              <Download size={16} aria-hidden />
+              <span>{exportState === "exporting" ? "생성 중" : "이미지 저장"}</span>
+            </button>
+          </div>
           <button className="primary-button" type="button" onClick={saveRoom} disabled={saveState === "saving"}>
             {!isHistoricalVersion && saveState === "saved" ? <Check size={16} aria-hidden /> : <Save size={16} aria-hidden />}
             <span className="hidden sm:inline">
@@ -1909,6 +1952,15 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
           {saveState === "error" ? (
             <div className="absolute right-4 top-4 z-10 rounded-md border border-[#f2b8ad] bg-[#fff3f0] px-3 py-2 text-sm text-[#b42318]">
               저장하지 못했습니다.
+            </div>
+          ) : null}
+          {exportState === "error" ? (
+            <div
+              className={`absolute right-4 z-10 rounded-md border border-[#f2b8ad] bg-[#fff3f0] px-3 py-2 text-sm text-[#b42318] ${
+                saveState === "error" ? "top-16" : "top-4"
+              }`}
+            >
+              이미지 추출에 실패했습니다.
             </div>
           ) : null}
           {isHistoricalVersion ? (
@@ -2122,6 +2174,13 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
                   <MobileToolButton title="선택 설정" onClick={() => openMobilePanel("selection")}>
                     <Settings size={19} aria-hidden />
                   </MobileToolButton>
+                  <MobileToolButton
+                    title={exportState === "exporting" ? "이미지 생성 중" : "이미지 저장"}
+                    disabled={exportState === "exporting"}
+                    onClick={() => void exportRoomImage()}
+                  >
+                    <Download size={19} aria-hidden />
+                  </MobileToolButton>
                   <MobileToolButton title="그룹" disabled={selectedIds.length < 2} onClick={groupSelected}>
                     <Group size={19} aria-hidden />
                   </MobileToolButton>
@@ -2160,6 +2219,13 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
                   </MobileToolButton>
                   <MobileToolButton title={isHistoricalVersion ? "새 버전으로 저장" : "저장"} disabled={saveState === "saving"} onClick={saveRoom}>
                     {!isHistoricalVersion && saveState === "saved" ? <Check size={19} aria-hidden /> : <Save size={19} aria-hidden />}
+                  </MobileToolButton>
+                  <MobileToolButton
+                    title={exportState === "exporting" ? "이미지 생성 중" : "이미지 저장"}
+                    disabled={exportState === "exporting"}
+                    onClick={() => void exportRoomImage()}
+                  >
+                    <Download size={19} aria-hidden />
                   </MobileToolButton>
                   <MobileToolButton title="설정" onClick={() => openMobilePanel("canvas")}>
                     <Settings size={19} aria-hidden />
@@ -2849,6 +2915,193 @@ function MobileTabButton({
   );
 }
 
+async function createRoomImageBlob({
+  scene,
+  blueprintImage,
+  blueprintPlacement,
+  blueprintOpacity,
+}: {
+  scene: RoomScene;
+  blueprintImage: HTMLImageElement | null;
+  blueprintPlacement: BlueprintPlacement;
+  blueprintOpacity: number;
+}) {
+  const exportScale = getExportScale(scene.canvas.width, scene.canvas.height);
+  const exportWidth = Math.max(1, Math.round(scene.canvas.width * exportScale));
+  const exportHeight = Math.max(1, Math.round(scene.canvas.height * exportScale));
+  const previousPixelRatio = Konva.pixelRatio;
+  const container = document.createElement("div");
+  container.style.position = "fixed";
+  container.style.left = "-100000px";
+  container.style.top = "-100000px";
+  container.style.width = `${exportWidth}px`;
+  container.style.height = `${exportHeight}px`;
+  document.body.appendChild(container);
+
+  let stage: KonvaStage | null = null;
+
+  try {
+    Konva.pixelRatio = 1;
+    stage = new Konva.Stage({
+      container,
+      width: exportWidth,
+      height: exportHeight,
+    });
+
+    const layer = new Konva.Layer({
+      listening: false,
+      scaleX: exportScale,
+      scaleY: exportScale,
+    });
+    stage.add(layer);
+
+    layer.add(
+      new Konva.Rect({
+        x: 0,
+        y: 0,
+        width: scene.canvas.width,
+        height: scene.canvas.height,
+        fill: "#ffffff",
+        listening: false,
+      }),
+    );
+
+    if (blueprintImage) {
+      layer.add(
+        new Konva.Image({
+          image: blueprintImage,
+          x: blueprintPlacement.x,
+          y: blueprintPlacement.y,
+          width: blueprintPlacement.width,
+          height: blueprintPlacement.height,
+          rotation: blueprintPlacement.rotation,
+          opacity: clamp(blueprintOpacity, 0, 1),
+          listening: false,
+        }),
+      );
+    }
+
+    for (const wall of scene.walls) {
+      layer.add(
+        new Konva.Line({
+          points: flattenPoints(wall.points),
+          stroke: wall.color,
+          strokeWidth: wall.strokeWidth,
+          lineCap: "round",
+          lineJoin: "round",
+          tension: wall.toolType === "freehand" ? 0.35 : 0,
+          listening: false,
+        }),
+      );
+    }
+
+    for (const item of scene.furniture) {
+      const group = new Konva.Group({
+        x: item.x,
+        y: item.y,
+        rotation: item.rotation,
+        listening: false,
+      });
+
+      if (item.type === "rect") {
+        group.add(
+          new Konva.Rect({
+            x: 0,
+            y: 0,
+            width: item.width,
+            height: item.height,
+            fill: item.fill,
+            stroke: "#3d4652",
+            strokeWidth: 1,
+            listening: false,
+          }),
+        );
+      } else {
+        group.add(
+          new Konva.Circle({
+            x: item.width / 2,
+            y: item.height / 2,
+            radius: item.width / 2,
+            fill: item.fill,
+            stroke: "#3d4652",
+            strokeWidth: 1,
+            listening: false,
+          }),
+        );
+      }
+
+      group.add(
+        new Konva.Text({
+          x: 0,
+          y: item.height / 2 - 7,
+          width: item.width,
+          text: item.label,
+          align: "center",
+          fontSize: 13,
+          fill: "#252a31",
+          listening: false,
+        }),
+      );
+      layer.add(group);
+    }
+
+    layer.draw();
+
+    const blob = (await stage.toBlob({
+      mimeType: "image/png",
+      pixelRatio: 1,
+    })) as Blob | null;
+
+    if (!blob) {
+      throw new Error("Image export failed");
+    }
+
+    return blob;
+  } finally {
+    stage?.destroy();
+    container.remove();
+    Konva.pixelRatio = previousPixelRatio;
+  }
+}
+
+function getExportScale(width: number, height: number) {
+  const longestEdge = Math.max(width, height);
+
+  if (longestEdge <= 0) {
+    return 1;
+  }
+
+  return Math.min(EXPORT_MAX_PIXEL_RATIO, EXPORT_MAX_LONG_EDGE / longestEdge);
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function createExportFileName(name: string | null, version: number) {
+  const baseName = sanitizeFileName(name?.trim() || "room-canvas");
+
+  return `${baseName}-v${version}.png`;
+}
+
+function sanitizeFileName(value: string) {
+  const sanitized = value
+    .replace(/[\\/:*?"<>|]+/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 80);
+
+  return sanitized || "room-canvas";
+}
+
 function flattenPoints(points: Point[]) {
   return points.flatMap((point) => [point.x, point.y]);
 }
@@ -2890,14 +3143,14 @@ function mergeSelection(current: string[], next: string[]) {
   return Array.from(merged);
 }
 
-function topLeftFromNode(node: Konva.Node): Point {
+function topLeftFromNode(node: KonvaNode): Point {
   return {
     x: node.x(),
     y: node.y(),
   };
 }
 
-function setNodeTopLeft(node: Konva.Node, point: Point) {
+function setNodeTopLeft(node: KonvaNode, point: Point) {
   node.position(point);
 }
 
@@ -2985,7 +3238,7 @@ function clampFurnitureDragDelta(
   };
 }
 
-function clampNodeBoundsToCanvas(node: Konva.Node, canvas: RoomScene["canvas"]): Point {
+function clampNodeBoundsToCanvas(node: KonvaNode, canvas: RoomScene["canvas"]): Point {
   const bounds = node.getClientRect({ relativeTo: node.getParent() ?? undefined });
   const offset = {
     x: clampOverflowOffset(bounds.x, bounds.width, canvas.width),
