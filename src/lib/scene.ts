@@ -92,28 +92,55 @@ export function createEmptyScene(width: number, height: number): RoomScene {
 
 export function parseScene(scene: string, width: number, height: number): RoomScene {
   try {
-    const parsed = JSON.parse(scene) as Partial<RoomScene>;
-
-    if (parsed.schemaVersion !== 1 || !parsed.canvas) {
-      return createEmptyScene(width, height);
-    }
-
-    return {
-      schemaVersion: 1,
-      canvas: {
-        width: safeDimension(parsed.canvas.width, width),
-        height: safeDimension(parsed.canvas.height, height),
-        gridSize: safeGridSize(parsed.canvas.gridSize),
-        snapToGrid: Boolean(parsed.canvas.snapToGrid),
-      },
-      walls: Array.isArray(parsed.walls) ? parsed.walls : [],
-      furniture: Array.isArray(parsed.furniture) ? parsed.furniture : [],
-      groups: Array.isArray(parsed.groups) ? parsed.groups : [],
-      meta: parsed.meta ?? {},
-    };
+    return normalizeRoomScene(JSON.parse(scene), width, height) ?? createEmptyScene(width, height);
   } catch {
     return createEmptyScene(width, height);
   }
+}
+
+export function normalizeRoomScene(
+  value: unknown,
+  fallbackWidth = 1000,
+  fallbackHeight = 700,
+  options: { requireCanvasDimensions?: boolean; requireCollections?: boolean } = {},
+): RoomScene | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const scene = value as Partial<RoomScene>;
+
+  if (scene.schemaVersion !== 1 || !scene.canvas) {
+    return null;
+  }
+
+  const hasValidCollections =
+    Array.isArray(scene.walls) && Array.isArray(scene.furniture) && Array.isArray(scene.groups);
+
+  if (options.requireCollections && !hasValidCollections) {
+    return null;
+  }
+
+  const hasValidCanvasDimensions =
+    Number.isFinite(scene.canvas.width) && Number.isFinite(scene.canvas.height);
+
+  if (options.requireCanvasDimensions && !hasValidCanvasDimensions) {
+    return null;
+  }
+
+  return {
+    schemaVersion: 1,
+    canvas: {
+      width: safeDimension(scene.canvas.width, fallbackWidth),
+      height: safeDimension(scene.canvas.height, fallbackHeight),
+      gridSize: safeGridSize(scene.canvas.gridSize),
+      snapToGrid: Boolean(scene.canvas.snapToGrid),
+    },
+    walls: Array.isArray(scene.walls) ? scene.walls : [],
+    furniture: Array.isArray(scene.furniture) ? scene.furniture : [],
+    groups: Array.isArray(scene.groups) ? scene.groups : [],
+    meta: scene.meta && typeof scene.meta === "object" ? scene.meta : {},
+  };
 }
 
 export function serializeScene(scene: RoomScene): string {
