@@ -1393,6 +1393,10 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
       return;
     }
 
+    if (isCanvasUiTarget(event.target)) {
+      return;
+    }
+
     updateActivePointer(event.pointerId, event.clientX, event.clientY);
 
     if (activePointersRef.current.size >= 2) {
@@ -1415,6 +1419,10 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   }
 
   function handleViewportPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!panStartRef.current && !pinchStartRef.current && isCanvasUiTarget(event.target)) {
+      return;
+    }
+
     updateActivePointer(event.pointerId, event.clientX, event.clientY);
 
     if (pinchStartRef.current) {
@@ -2149,7 +2157,10 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
             </div>
           </div>
 
-          <div className="pointer-events-none absolute left-3 top-3 z-10 flex items-center gap-2 lg:hidden">
+          <div
+            className="pointer-events-none absolute left-3 top-3 z-10 flex items-center gap-2 lg:hidden"
+            data-canvas-ui="true"
+          >
             <span className="rounded-md border border-[#cbd2dc] bg-white/95 px-2 py-1 text-xs font-semibold text-[#303742] shadow-sm">
               {zoomPercent}%
             </span>
@@ -2162,7 +2173,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
             </button>
           </div>
 
-          <div className="absolute inset-x-3 bottom-3 z-10 lg:hidden">
+          <div className="absolute inset-x-3 bottom-3 z-10 lg:hidden" data-canvas-ui="true">
             <div className="flex gap-2 overflow-x-auto rounded-md border border-[#cbd2dc] bg-white/95 p-2 shadow-lg">
               {selectedIds.length > 0 ? (
                 <>
@@ -3340,4 +3351,16 @@ function isEditableTarget(target: EventTarget | null) {
   }
 
   return ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) || target.isContentEditable;
+}
+
+function isCanvasUiTarget(target: EventTarget | null) {
+  if (!(target instanceof Element)) {
+    return false;
+  }
+
+  return Boolean(
+    target.closest(
+      '[data-canvas-ui="true"], button, a, input, textarea, select, label, [role="button"]',
+    ),
+  );
 }
