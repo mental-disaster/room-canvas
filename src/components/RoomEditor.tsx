@@ -43,7 +43,6 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactElement,
   type ReactNode,
-  type WheelEvent as ReactWheelEvent,
 } from "react";
 
 import type { FurnitureItem, Point, RoomPayload, RoomScene, RoomVersionSummary, WallToolType } from "@/lib/scene";
@@ -63,6 +62,14 @@ type BlueprintPlacement = {
   height: number;
   rotation: number;
 };
+type PanStart = {
+  pointerId: number;
+  x: number;
+  y: number;
+  offset: Point;
+  hasMoved: boolean;
+  clearSelectionOnClick: boolean;
+};
 
 const FURNITURE_COLORS = ["#d8eef2", "#f7d7cc", "#e9e1f5", "#dfead2", "#f3e2b8", "#dce3ee"];
 const WALL_COLOR = "#26313f";
@@ -80,6 +87,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   const [wallStrokeWidth, setWallStrokeWidth] = useState(3);
   const [isSpacePressed, setIsSpacePressed] = useState(false);
   const [zoom, setZoom] = useState(1);
+  const [canvasOffset, setCanvasOffsetState] = useState<Point>({ x: 0, y: 0 });
   const [blueprintUrl, setBlueprintUrl] = useState<string | null>(null);
   const [blueprintImage, setBlueprintImage] = useState<HTMLImageElement | null>(null);
   const [blueprintPlacement, setBlueprintPlacement] = useState<BlueprintPlacement>({
@@ -116,6 +124,8 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   const finishFreehandDrawingRef = useRef<() => void>(() => undefined);
   const toolRef = useRef<Tool>("select");
   const zoomRef = useRef(1);
+  const canvasOffsetRef = useRef<Point>({ x: 0, y: 0 });
+  const didCenterInitialCanvasRef = useRef(false);
   const wallStrokeWidthRef = useRef(3);
   const gridSizeRef = useRef(initialRoom.scene.canvas.gridSize);
   const snapToGridRef = useRef(initialRoom.scene.canvas.snapToGrid);
@@ -128,13 +138,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
     ids: string[];
     positions: Record<string, Point>;
   } | null>(null);
-  const panStartRef = useRef<{
-    pointerId: number;
-    x: number;
-    y: number;
-    scrollLeft: number;
-    scrollTop: number;
-  } | null>(null);
+  const panStartRef = useRef<PanStart | null>(null);
 
   const selectedItems = useMemo(
     () => scene.furniture.filter((item) => selectedIds.includes(item.id)),
@@ -151,6 +155,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   const stagePixelWidth = scene.canvas.width * zoom;
   const stagePixelHeight = scene.canvas.height * zoom;
   const isPanningMode = tool === "pan" || isSpacePressed;
+  const canBlankPan = tool === "select" || isPanningMode;
   const zoomPercent = Math.round(zoom * 100);
   const hasUnsavedChanges = saveState === "idle" || saveState === "error";
 
@@ -165,6 +170,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
     isFreehandDrawingRef.current = isFreehandDrawing;
     toolRef.current = tool;
     zoomRef.current = zoom;
+    canvasOffsetRef.current = canvasOffset;
     wallStrokeWidthRef.current = wallStrokeWidth;
     gridSizeRef.current = scene.canvas.gridSize;
     snapToGridRef.current = scene.canvas.snapToGrid;
@@ -180,6 +186,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
     tool,
     wallStrokeWidth,
     zoom,
+    canvasOffset,
   ]);
 
   const commitScene = useCallback((updater: RoomScene | ((current: RoomScene) => RoomScene)) => {
@@ -228,7 +235,28 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
     isFreehandDrawingRef.current = false;
   }
 
-  function applyRoomPayload(payload: RoomPayload) {
+  function setCanvasOffset(nextOffset: Point | ((current: Point) => Point)) {
+    setCanvasOffsetState((current) => {
+      const next = typeof nextOffset === "function" ? nextOffset(current) : nextOffset;
+      canvasOffsetRef.current = next;
+      return next;
+    });
+  }
+
+  function centerCanvasInViewport(targetScene: RoomScene, targetZoom = zoomRef.current) {
+    const viewport = viewportRef.current;
+
+    if (!viewport) {
+      return;
+    }
+
+    setCanvasOffset({
+      x: Math.round((viewport.clientWidth - targetScene.canvas.width * targetZoom) / 2),
+      y: Math.round((viewport.clientHeight - targetScene.canvas.height * targetZoom) / 2),
+    });
+  }
+
+  function applyRoomPayload(payload: RoomPayload, options: { centerCanvas?: boolean } = {}) {
     setScene(payload.scene);
     setUpdatedAt(payload.updatedAt);
     setCurrentVersion(payload.version);
@@ -239,6 +267,10 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
     setSelectedIds([]);
     clearInProgressDrawing();
     setSaveState("saved");
+
+    if (options.centerCanvas) {
+      requestAnimationFrame(() => centerCanvasInViewport(payload.scene));
+    }
   }
 
   function pushVersionUrl(version: number) {
@@ -251,6 +283,17 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
     setIsVersionPanelOpen(true);
     void loadVersions();
   }
+
+  useEffect(() => {
+    if (didCenterInitialCanvasRef.current) {
+      return;
+    }
+
+    didCenterInitialCanvasRef.current = true;
+    const animationFrame = requestAnimationFrame(() => centerCanvasInViewport(scene));
+
+    return () => cancelAnimationFrame(animationFrame);
+  });
 
   const deleteSelected = useCallback(() => {
     if (selectedIds.length === 0) {
@@ -495,7 +538,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
     return scene.canvas.snapToGrid && tool !== "wall-freehand" ? snapPoint(point, scene.canvas.gridSize) : point;
   }
 
-  function handleStagePointerDown(event: Konva.KonvaEventObject<MouseEvent | TouchEvent>) {
+  function handleStagePointerDown(event: Konva.KonvaEventObject<PointerEvent>) {
     if (isPanningMode) {
       return;
     }
@@ -508,7 +551,9 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
     }
 
     if (tool === "select") {
-      setSelectedIds([]);
+      event.evt.preventDefault();
+      event.evt.stopPropagation();
+      beginCanvasPan(event.evt.pointerId, event.evt.clientX, event.evt.clientY, true);
       return;
     }
 
@@ -535,6 +580,10 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   }
 
   function handleStagePointerMove() {
+    if (panStartRef.current) {
+      return;
+    }
+
     if (isLineDrawing && tool === "wall-line") {
       const point = getPointerPoint();
 
@@ -569,6 +618,10 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   }
 
   function handleStagePointerUp() {
+    if (panStartRef.current) {
+      return;
+    }
+
     if (isLineDrawing && tool === "wall-line") {
       finishLineDrawing();
       return;
@@ -903,7 +956,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
       }
 
       const payload = (await response.json()) as RoomPayload;
-      applyRoomPayload(payload);
+      applyRoomPayload(payload, { centerCanvas: true });
       pushVersionUrl(payload.version);
       setVersionListState("idle");
       setIsVersionPanelOpen(false);
@@ -1037,39 +1090,81 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
     });
   }
 
-  function handleViewportPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
-    if (!isPanningMode) {
-      return;
-    }
-
+  function beginCanvasPan(
+    pointerId: number,
+    clientX: number,
+    clientY: number,
+    clearSelectionOnClick: boolean,
+  ) {
     const viewport = viewportRef.current;
 
     if (!viewport) {
       return;
     }
 
-    event.preventDefault();
-    viewport.setPointerCapture(event.pointerId);
+    try {
+      if (!viewport.hasPointerCapture(pointerId)) {
+        viewport.setPointerCapture(pointerId);
+      }
+    } catch {
+      // Pointer capture can fail if the browser has already released this pointer.
+    }
+
     panStartRef.current = {
-      pointerId: event.pointerId,
-      x: event.clientX,
-      y: event.clientY,
-      scrollLeft: viewport.scrollLeft,
-      scrollTop: viewport.scrollTop,
+      pointerId,
+      x: clientX,
+      y: clientY,
+      offset: canvasOffsetRef.current,
+      hasMoved: false,
+      clearSelectionOnClick,
     };
   }
 
-  function handleViewportPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
-    const panStart = panStartRef.current;
+  function handleViewportPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
     const viewport = viewportRef.current;
 
-    if (!panStart || !viewport || panStart.pointerId !== event.pointerId) {
+    if (!viewport) {
+      return;
+    }
+
+    const stageShell = viewport.querySelector(".stage-shell");
+    const target = event.target;
+    const isInsideStage = target instanceof Node && stageShell?.contains(target);
+    const shouldPan = isPanningMode || (tool === "select" && !isInsideStage);
+
+    if (!shouldPan) {
       return;
     }
 
     event.preventDefault();
-    viewport.scrollLeft = panStart.scrollLeft - (event.clientX - panStart.x);
-    viewport.scrollTop = panStart.scrollTop - (event.clientY - panStart.y);
+    beginCanvasPan(event.pointerId, event.clientX, event.clientY, tool === "select");
+  }
+
+  function handleViewportPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    const panStart = panStartRef.current;
+
+    if (!panStart || panStart.pointerId !== event.pointerId) {
+      return;
+    }
+
+    const deltaX = event.clientX - panStart.x;
+    const deltaY = event.clientY - panStart.y;
+    const hasMoved = panStart.hasMoved || Math.hypot(deltaX, deltaY) >= 4;
+
+    panStartRef.current = {
+      ...panStart,
+      hasMoved,
+    };
+
+    if (!hasMoved) {
+      return;
+    }
+
+    event.preventDefault();
+    setCanvasOffset({
+      x: panStart.offset.x + deltaX,
+      y: panStart.offset.y + deltaY,
+    });
   }
 
   function handleViewportPointerUp(event: ReactPointerEvent<HTMLDivElement>) {
@@ -1080,82 +1175,114 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
       return;
     }
 
-    if (viewport.hasPointerCapture(event.pointerId)) {
-      viewport.releasePointerCapture(event.pointerId);
+    try {
+      if (viewport.hasPointerCapture(event.pointerId)) {
+        viewport.releasePointerCapture(event.pointerId);
+      }
+    } catch {
+      // Ignore late pointer cleanup after the pointer was released by the browser.
+    }
+
+    if (panStart.clearSelectionOnClick && !panStart.hasMoved) {
+      setSelectedIds([]);
     }
 
     panStartRef.current = null;
   }
 
-  function handleViewportWheel(event: ReactWheelEvent<HTMLDivElement>) {
-    if (!(event.ctrlKey || event.metaKey)) {
-      handOffWheelToPageAtScrollEdge(event);
-      return;
-    }
-
-    event.preventDefault();
+  function viewportPointFromClient(clientX: number, clientY: number): Point | null {
     const viewport = viewportRef.current;
-    const previousZoom = zoom;
-    const previousPercent = Math.round(previousZoom * 100);
-    const roundedPercent = Math.round(previousPercent / 10) * 10;
-    const nextPercent = clamp(roundedPercent + (event.deltaY > 0 ? -10 : 10), 25, 300);
-    const nextZoom = nextPercent / 100;
 
-    if (!viewport || nextZoom === previousZoom) {
-      setZoom(nextZoom);
-      return;
+    if (!viewport) {
+      return null;
     }
 
     const rect = viewport.getBoundingClientRect();
-    const pointerX = event.clientX - rect.left;
-    const pointerY = event.clientY - rect.top;
-    const anchorX = (viewport.scrollLeft + pointerX) / previousZoom;
-    const anchorY = (viewport.scrollTop + pointerY) / previousZoom;
 
-    setZoom(nextZoom);
-
-    requestAnimationFrame(() => {
-      viewport.scrollLeft = anchorX * nextZoom - pointerX;
-      viewport.scrollTop = anchorY * nextZoom - pointerY;
-    });
+    return {
+      x: clientX - rect.left,
+      y: clientY - rect.top,
+    };
   }
 
-  function handOffWheelToPageAtScrollEdge(event: ReactWheelEvent<HTMLDivElement>) {
+  function viewportCenterPoint(): Point | null {
     const viewport = viewportRef.current;
 
-    if (!viewport || event.deltaY === 0) {
+    if (!viewport) {
+      return null;
+    }
+
+    return {
+      x: viewport.clientWidth / 2,
+      y: viewport.clientHeight / 2,
+    };
+  }
+
+  function setZoomAtViewportPoint(nextZoom: number, viewportPoint: Point | null) {
+    const previousZoom = zoomRef.current;
+    const clampedZoom = clamp(nextZoom, 0.25, 3);
+
+    if (!viewportPoint || clampedZoom === previousZoom) {
+      zoomRef.current = clampedZoom;
+      setZoom(clampedZoom);
       return;
     }
 
-    const maxScrollTop = viewport.scrollHeight - viewport.clientHeight;
-    const isAtTop = viewport.scrollTop <= 0;
-    const isAtBottom = viewport.scrollTop >= maxScrollTop - 1;
-    const shouldHandOff = (event.deltaY < 0 && isAtTop) || (event.deltaY > 0 && isAtBottom);
+    const offset = canvasOffsetRef.current;
+    const anchorX = (viewportPoint.x - offset.x) / previousZoom;
+    const anchorY = (viewportPoint.y - offset.y) / previousZoom;
+    const nextOffset = {
+      x: viewportPoint.x - anchorX * clampedZoom,
+      y: viewportPoint.y - anchorY * clampedZoom,
+    };
 
-    if (!shouldHandOff) {
-      return;
-    }
+    zoomRef.current = clampedZoom;
+    canvasOffsetRef.current = nextOffset;
+    setZoom(clampedZoom);
+    setCanvasOffsetState(nextOffset);
+  }
 
-    const pageScroller = document.scrollingElement;
-
-    if (!pageScroller || pageScroller.scrollHeight <= pageScroller.clientHeight) {
-      return;
-    }
-
+  function handleNativeViewportWheel(event: WheelEvent) {
     event.preventDefault();
-    pageScroller.scrollTop += event.deltaY;
+    event.stopPropagation();
+
+    if (event.ctrlKey || event.metaKey) {
+      const previousZoom = zoomRef.current;
+      const previousPercent = Math.round(previousZoom * 100);
+      const roundedPercent = Math.round(previousPercent / 10) * 10;
+      const nextPercent = clamp(roundedPercent + (event.deltaY > 0 ? -10 : 10), 25, 300);
+      setZoomAtViewportPoint(nextPercent / 100, viewportPointFromClient(event.clientX, event.clientY));
+      return;
+    }
+
+    setCanvasOffset((current) => ({
+      x: current.x - event.deltaX,
+      y: current.y - event.deltaY,
+    }));
   }
 
   function setZoomPercent(value: number) {
-    setZoom(clamp(value, 25, 300) / 100);
+    setZoomAtViewportPoint(clamp(value, 25, 300) / 100, viewportCenterPoint());
   }
 
   function nudgeZoom(delta: number) {
-    setZoom((current) => {
-      const roundedPercent = Math.round((current * 100) / 10) * 10;
-      return clamp(roundedPercent + delta, 25, 300) / 100;
-    });
+    const roundedPercent = Math.round((zoomRef.current * 100) / 10) * 10;
+    setZoomAtViewportPoint(clamp(roundedPercent + delta, 25, 300) / 100, viewportCenterPoint());
   }
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+
+    if (!viewport) {
+      return;
+    }
+
+    viewport.addEventListener("wheel", handleNativeViewportWheel, { passive: false });
+
+    return () => {
+      viewport.removeEventListener("wheel", handleNativeViewportWheel);
+    };
+  });
 
   useEffect(() => {
     finishLineDrawingRef.current = finishLineDrawing;
@@ -1239,8 +1366,8 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   }, []);
 
   return (
-    <div className="flex min-h-dvh flex-col bg-[#f5f6f8] text-[#15181c]">
-      <header className="flex min-h-14 flex-wrap items-center justify-between gap-3 border-b border-[#d9dee7] bg-white px-4 py-2">
+    <div className="flex h-dvh overflow-hidden flex-col bg-[#f5f6f8] text-[#15181c]">
+      <header className="flex min-h-14 shrink-0 flex-wrap items-center justify-between gap-3 border-b border-[#d9dee7] bg-white px-4 py-2">
         <div className="min-w-0">
           <h1 className="truncate text-base font-semibold">{initialRoom.name ?? "Room Canvas"}</h1>
           <p className="text-xs text-[#66707d]">
@@ -1284,8 +1411,8 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
         />
       ) : null}
 
-      <div className="grid flex-1 grid-cols-1 lg:grid-cols-[64px_minmax(0,1fr)_300px]">
-        <aside className="flex gap-2 overflow-x-auto border-b border-[#d9dee7] bg-white p-2 lg:flex-col lg:border-b-0 lg:border-r">
+      <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[auto_minmax(0,1fr)_minmax(0,18rem)] lg:grid-cols-[64px_minmax(0,1fr)_300px] lg:grid-rows-1">
+        <aside className="flex min-h-0 gap-2 overflow-x-auto overflow-y-hidden border-b border-[#d9dee7] bg-white p-2 lg:flex-col lg:overflow-x-hidden lg:overflow-y-auto lg:border-b-0 lg:border-r">
           <IconButton active={tool === "select"} title="선택" onClick={() => setActiveTool("select")}>
             <MousePointer2 size={19} aria-hidden />
           </IconButton>
@@ -1318,12 +1445,11 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
 
         <main
           ref={viewportRef}
-          className={`canvas-viewport relative overflow-auto bg-[#e7ebf0] ${isPanningMode ? "cursor-grab active:cursor-grabbing" : ""}`}
+          className={`canvas-viewport relative min-h-0 overflow-hidden bg-[#e7ebf0] ${canBlankPan ? "cursor-grab active:cursor-grabbing" : ""}`}
           onPointerDown={handleViewportPointerDown}
           onPointerMove={handleViewportPointerMove}
           onPointerUp={handleViewportPointerUp}
           onPointerCancel={handleViewportPointerUp}
-          onWheel={handleViewportWheel}
         >
           {saveState === "error" ? (
             <div className="absolute right-4 top-4 z-10 rounded-md border border-[#f2b8ad] bg-[#fff3f0] px-3 py-2 text-sm text-[#b42318]">
@@ -1337,6 +1463,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
               style={{
                 width: stagePixelWidth,
                 height: stagePixelHeight,
+                transform: `translate3d(${canvasOffset.x}px, ${canvasOffset.y}px, 0)`,
               }}
             >
               <Stage
@@ -1345,12 +1472,9 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
                 height={stagePixelHeight}
                 scaleX={zoom}
                 scaleY={zoom}
-                onMouseDown={handleStagePointerDown}
-                onMouseMove={handleStagePointerMove}
-                onMouseUp={handleStagePointerUp}
-                onTouchStart={handleStagePointerDown}
-                onTouchMove={handleStagePointerMove}
-                onTouchEnd={handleStagePointerUp}
+                onPointerDown={handleStagePointerDown}
+                onPointerMove={handleStagePointerMove}
+                onPointerUp={handleStagePointerUp}
               >
                 <Layer>
                   <Rect
@@ -1436,7 +1560,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
                       x={item.x}
                       y={item.y}
                       rotation={item.rotation}
-                      draggable={tool === "select"}
+                      draggable={tool === "select" && !isPanningMode}
                       onClick={(event) => selectFurniture(item, event)}
                       onTap={(event) => selectFurniture(item, event)}
                       onDragStart={() => handleDragStart(item)}
@@ -1509,7 +1633,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
           </div>
         </main>
 
-        <aside className="border-t border-[#d9dee7] bg-white p-4 lg:border-l lg:border-t-0">
+        <aside className="min-h-0 overflow-y-auto border-t border-[#d9dee7] bg-white p-4 lg:border-l lg:border-t-0">
           <div className="grid gap-6">
             <section className="grid gap-3">
               <PanelTitle title="캔버스" />
