@@ -68,33 +68,26 @@ export async function PUT(request: Request, context: RouteContext) {
     return NextResponse.json({ message: "Invalid version." }, { status: 400 });
   }
 
-  const existing = await prisma.room.findUnique({
-    where: { shareId },
-    select: {
-      id: true,
-      shareId: true,
-      name: true,
-      latestVersion: true,
-    },
-  });
-
-  if (!existing) {
-    return NextResponse.json({ message: "Room not found." }, { status: 404 });
-  }
-
-  if (versionNumber !== existing.latestVersion) {
-    return NextResponse.json(
-      { message: "Only the latest version can be overwritten. Create a new version instead." },
-      { status: 409 },
-    );
-  }
-
   const serializedScene = serializeScene(scene);
   const result = await prisma.$transaction(async (tx) => {
+    const room = await tx.room.findUnique({
+      where: { shareId },
+      select: {
+        id: true,
+        shareId: true,
+        name: true,
+        latestVersion: true,
+      },
+    });
+
+    if (!room) {
+      return { status: "room-not-found" as const };
+    }
+
     const targetVersion = await tx.roomVersion.findUnique({
       where: {
         roomId_version: {
-          roomId: existing.id,
+          roomId: room.id,
           version: versionNumber,
         },
       },
@@ -105,22 +98,6 @@ export async function PUT(request: Request, context: RouteContext) {
 
     if (!targetVersion) {
       return { status: "not-found" as const };
-    }
-
-    const updatedRoom = await tx.room.updateMany({
-      where: {
-        id: existing.id,
-        latestVersion: versionNumber,
-      },
-      data: {
-        width: scene.canvas.width,
-        height: scene.canvas.height,
-        scene: serializedScene,
-      },
-    });
-
-    if (updatedRoom.count === 0) {
-      return { status: "conflict" as const };
     }
 
     const updatedVersion = await tx.roomVersion.update({
@@ -134,19 +111,43 @@ export async function PUT(request: Request, context: RouteContext) {
       },
     });
 
-    return { status: "saved" as const, version: updatedVersion };
+    await tx.room.updateMany({
+      where: {
+        id: room.id,
+        latestVersion: versionNumber,
+      },
+      data: {
+        width: scene.canvas.width,
+        height: scene.canvas.height,
+        scene: serializedScene,
+      },
+    });
+
+    const updatedRoom = await tx.room.findUnique({
+      where: {
+        id: room.id,
+      },
+      select: {
+        shareId: true,
+        name: true,
+        latestVersion: true,
+      },
+    });
+
+    if (!updatedRoom) {
+      return { status: "room-not-found" as const };
+    }
+
+    return { status: "saved" as const, room: updatedRoom, version: updatedVersion };
   });
+
+  if (result.status === "room-not-found") {
+    return NextResponse.json({ message: "Room not found." }, { status: 404 });
+  }
 
   if (result.status === "not-found") {
     return NextResponse.json({ message: "Room version not found." }, { status: 404 });
   }
 
-  if (result.status === "conflict") {
-    return NextResponse.json(
-      { message: "Only the latest version can be overwritten. Create a new version instead." },
-      { status: 409 },
-    );
-  }
-
-  return NextResponse.json(toRoomPayload(existing, result.version));
+  return NextResponse.json(toRoomPayload(result.room, result.version));
 }

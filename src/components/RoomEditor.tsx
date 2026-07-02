@@ -1064,11 +1064,6 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   }
 
   async function saveRoom() {
-    if (isHistoricalVersion) {
-      openVersionPanel();
-      return;
-    }
-
     setSaveState("saving");
 
     try {
@@ -1900,9 +1895,9 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
             </button>
           </div>
           <button className="primary-button" type="button" onClick={saveRoom} disabled={saveState === "saving"}>
-            {!isHistoricalVersion && saveState === "saved" ? <Check size={16} aria-hidden /> : <Save size={16} aria-hidden />}
+            {saveState === "saved" ? <Check size={16} aria-hidden /> : <Save size={16} aria-hidden />}
             <span className="hidden sm:inline">
-              {isHistoricalVersion ? "새 버전" : saveState === "saving" ? "저장 중" : saveState === "saved" ? "저장됨" : "저장"}
+              {saveState === "saving" ? "저장 중" : saveState === "saved" ? "저장됨" : "저장"}
             </span>
           </button>
         </div>
@@ -1980,7 +1975,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
           ) : null}
           {isHistoricalVersion ? (
             <div className="absolute left-4 top-4 z-10 max-w-[calc(100%-2rem)] rounded-md border border-[#f1d18a] bg-[#fff8e5] px-3 py-2 text-sm text-[#6f4b00]">
-              과거 버전 편집 중입니다. 저장하려면 새 버전을 만드세요.
+              v{currentVersion} 편집 중입니다. 저장하면 이 버전만 갱신되고 기본 링크는 v{latestVersion}을 엽니다.
             </div>
           ) : null}
 
@@ -2235,8 +2230,8 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
                   <MobileToolButton title="되돌리기" disabled={history.past.length === 0} onClick={undo}>
                     <Undo2 size={19} aria-hidden />
                   </MobileToolButton>
-                  <MobileToolButton title={isHistoricalVersion ? "새 버전으로 저장" : "저장"} disabled={saveState === "saving"} onClick={saveRoom}>
-                    {!isHistoricalVersion && saveState === "saved" ? <Check size={19} aria-hidden /> : <Save size={19} aria-hidden />}
+                  <MobileToolButton title="저장" disabled={saveState === "saving"} onClick={saveRoom}>
+                    {saveState === "saved" ? <Check size={19} aria-hidden /> : <Save size={19} aria-hidden />}
                   </MobileToolButton>
                   <MobileToolButton
                     title={exportState === "exporting" ? "이미지 생성 중" : "이미지 저장"}
