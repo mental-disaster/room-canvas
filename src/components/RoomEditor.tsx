@@ -133,6 +133,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   const [versionMemo, setVersionMemo] = useState(initialRoom.versionMemo);
   const [versions, setVersions] = useState<RoomVersionSummary[]>([]);
   const [isVersionPanelOpen, setIsVersionPanelOpen] = useState(false);
+  const [versionPanelNotice, setVersionPanelNotice] = useState<string | null>(null);
   const [versionListState, setVersionListState] = useState<VersionListState>("idle");
   const [versionActionState, setVersionActionState] = useState<VersionActionState>("idle");
   const [isMobilePanelOpen, setIsMobilePanelOpen] = useState(false);
@@ -141,6 +142,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<KonvaStage>(null);
   const sceneRef = useRef(initialRoom.scene);
+  const currentVersionRef = useRef(initialRoom.version);
   const historyRef = useRef<HistoryState>({ past: [], future: [] });
   const canvasSizeRef = useRef({
     width: initialRoom.scene.canvas.width,
@@ -189,7 +191,8 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   const isPanningMode = tool === "pan" || isSpacePressed;
   const canBlankPan = tool === "select" || isPanningMode;
   const zoomPercent = Math.round(zoom * 100);
-  const hasUnsavedChanges = saveState === "idle" || saveState === "error";
+  const hasUnsavedChanges =
+    saveState !== "saved" || versionActionState === "creating" || versionActionState === "updating";
   const isHistoricalVersion = currentVersion < latestVersion;
 
   useEffect(() => {
@@ -207,8 +210,10 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
     wallStrokeWidthRef.current = wallStrokeWidth;
     gridSizeRef.current = scene.canvas.gridSize;
     snapToGridRef.current = scene.canvas.snapToGrid;
+    currentVersionRef.current = currentVersion;
   }, [
     currentWallPoints,
+    currentVersion,
     freehandPoints,
     isFreehandDrawing,
     isLineDrawing,
@@ -223,10 +228,6 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   ]);
 
   useEffect(() => {
-    if (!hasUnsavedChanges) {
-      return;
-    }
-
     function handleBeforeUnload(event: BeforeUnloadEvent) {
       event.preventDefault();
       event.returnValue = "";
@@ -234,6 +235,11 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
 
     const currentUrl = window.location.href;
     function handlePopState() {
+      if (!hasUnsavedChanges) {
+        window.location.reload();
+        return;
+      }
+
       if (window.confirm("저장하지 않은 변경사항이 사라집니다. 이동할까요?")) {
         window.removeEventListener("beforeunload", handleBeforeUnload);
         window.location.reload();
@@ -243,7 +249,10 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
       window.history.pushState(null, "", currentUrl);
     }
 
-    window.addEventListener("beforeunload", handleBeforeUnload);
+    if (hasUnsavedChanges) {
+      window.addEventListener("beforeunload", handleBeforeUnload);
+    }
+
     window.addEventListener("popstate", handlePopState);
 
     return () => {
@@ -346,6 +355,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
     setScene(payload.scene);
     setUpdatedAt(payload.updatedAt);
     setCurrentVersion(payload.version);
+    currentVersionRef.current = payload.version;
     setLatestVersion(payload.latestVersion);
     setVersionName(payload.versionName);
     setVersionMemo(payload.versionMemo);
@@ -359,6 +369,36 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
     }
   }
 
+  function applySavedRoomPayload(
+    payload: RoomPayload,
+    savedScene: RoomScene,
+    options: { expectedCurrentVersion?: number } = {},
+  ) {
+    if (
+      options.expectedCurrentVersion !== undefined &&
+      currentVersionRef.current !== options.expectedCurrentVersion
+    ) {
+      setSaveState("idle");
+      return;
+    }
+
+    setUpdatedAt(payload.updatedAt);
+    setCurrentVersion(payload.version);
+    currentVersionRef.current = payload.version;
+    setLatestVersion(payload.latestVersion);
+    setVersionName(payload.versionName);
+    setVersionMemo(payload.versionMemo);
+
+    if (sceneRef.current === savedScene) {
+      sceneRef.current = payload.scene;
+      setScene(payload.scene);
+      setSaveState("saved");
+      return;
+    }
+
+    setSaveState("idle");
+  }
+
   function pushVersionUrl(version: number) {
     const url = new URL(window.location.href);
     url.searchParams.set("version", String(version));
@@ -366,6 +406,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   }
 
   function openVersionPanel() {
+    setVersionPanelNotice(null);
     setIsVersionPanelOpen(true);
     void loadVersions();
   }
@@ -381,9 +422,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
     }
 
     didCenterInitialCanvasRef.current = true;
-    const animationFrame = requestAnimationFrame(() => centerCanvasInViewport(scene));
-
-    return () => cancelAnimationFrame(animationFrame);
+    requestAnimationFrame(() => centerCanvasInViewport(sceneRef.current));
   });
 
   const deleteSelected = useCallback(() => {
@@ -1064,6 +1103,10 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   }
 
   async function saveRoom() {
+    const sceneToSave = sceneRef.current;
+    const versionToSave = currentVersion;
+    const expectedUpdatedAt = updatedAt;
+
     setSaveState("saving");
 
     try {
@@ -1072,12 +1115,17 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ version: currentVersion, scene }),
+        body: JSON.stringify({
+          version: versionToSave,
+          updatedAt: expectedUpdatedAt,
+          scene: sceneToSave,
+        }),
       });
 
       if (response.status === 409) {
         await loadVersions();
         setSaveState("idle");
+        setVersionPanelNotice("다른 곳에서 이 버전이 수정되었습니다. 새 버전으로 저장하거나 버전을 다시 여세요.");
         setIsVersionPanelOpen(true);
         return;
       }
@@ -1087,7 +1135,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
       }
 
       const payload = (await response.json()) as RoomPayload;
-      applyRoomPayload(payload);
+      applySavedRoomPayload(payload, sceneToSave, { expectedCurrentVersion: versionToSave });
       await loadVersions();
     } catch {
       setSaveState("error");
@@ -1095,6 +1143,10 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   }
 
   async function openVersion(version: number) {
+    if (saveState === "saving") {
+      return;
+    }
+
     if (version === currentVersion) {
       setIsVersionPanelOpen(false);
       return;
@@ -1119,6 +1171,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
       const payload = (await response.json()) as RoomPayload;
       applyRoomPayload(payload, { centerCanvas: true });
       pushVersionUrl(payload.version);
+      setVersionPanelNotice(null);
       setVersionListState("idle");
       setIsVersionPanelOpen(false);
     } catch {
@@ -1129,6 +1182,12 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   }
 
   async function createVersion(name: string, memo: string) {
+    if (saveState === "saving") {
+      return;
+    }
+
+    const sceneToSave = sceneRef.current;
+
     setVersionActionState("creating");
 
     try {
@@ -1137,7 +1196,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ name, memo, scene }),
+        body: JSON.stringify({ name, memo, scene: sceneToSave }),
       });
 
       if (!response.ok) {
@@ -1145,8 +1204,9 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
       }
 
       const payload = (await response.json()) as RoomPayload;
-      applyRoomPayload(payload);
+      applySavedRoomPayload(payload, sceneToSave);
       pushVersionUrl(payload.version);
+      setVersionPanelNotice(null);
       await loadVersions();
     } catch {
       setVersionListState("error");
@@ -1156,6 +1216,10 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
   }
 
   async function updateVersionMeta(version: number, name: string, memo: string) {
+    if (saveState === "saving") {
+      return;
+    }
+
     setVersionActionState("updating");
 
     try {
@@ -1746,7 +1810,10 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
             type="file"
             accept="image/*"
             className="sr-only"
-            onChange={(event) => handleBlueprintUpload(event.target.files?.[0] ?? null)}
+            onChange={(event) => {
+              handleBlueprintUpload(event.target.files?.[0] ?? null);
+              event.target.value = "";
+            }}
           />
         </label>
         {blueprintImage ? (
@@ -1909,9 +1976,14 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
           versions={versions}
           currentVersion={currentVersion}
           latestVersion={latestVersion}
+          notice={versionPanelNotice}
+          isSaving={saveState === "saving"}
           listState={versionListState}
           actionState={versionActionState}
-          onClose={() => setIsVersionPanelOpen(false)}
+          onClose={() => {
+            setVersionPanelNotice(null);
+            setIsVersionPanelOpen(false);
+          }}
           onRefresh={loadVersions}
           onSelect={openVersion}
           onCreate={createVersion}
@@ -2086,6 +2158,7 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
                       x={item.x}
                       y={item.y}
                       rotation={item.rotation}
+                      listening={tool === "select"}
                       draggable={tool === "select" && !isPanningMode}
                       onClick={(event) => selectFurniture(item, event)}
                       onTap={(event) => selectFurniture(item, event)}
@@ -2325,7 +2398,10 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
                   type="file"
                   accept="image/*"
                   className="sr-only"
-                  onChange={(event) => handleBlueprintUpload(event.target.files?.[0] ?? null)}
+                  onChange={(event) => {
+                    handleBlueprintUpload(event.target.files?.[0] ?? null);
+                    event.target.value = "";
+                  }}
                 />
               </label>
               {blueprintImage ? (
@@ -2492,6 +2568,8 @@ function VersionPanel({
   versions,
   currentVersion,
   latestVersion,
+  notice,
+  isSaving,
   listState,
   actionState,
   onClose,
@@ -2503,6 +2581,8 @@ function VersionPanel({
   versions: RoomVersionSummary[];
   currentVersion: number;
   latestVersion: number;
+  notice: string | null;
+  isSaving: boolean;
   listState: VersionListState;
   actionState: VersionActionState;
   onClose: () => void;
@@ -2516,7 +2596,7 @@ function VersionPanel({
   const [editingVersion, setEditingVersion] = useState<number | null>(null);
   const [editName, setEditName] = useState("");
   const [editMemo, setEditMemo] = useState("");
-  const isBusy = actionState !== "idle";
+  const isBusy = actionState !== "idle" || isSaving;
 
   function submitNewVersion(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -2564,6 +2644,12 @@ function VersionPanel({
         </div>
 
         <div className="grid gap-5 overflow-y-auto p-4">
+          {notice ? (
+            <p className="rounded-md border border-[#f1d18a] bg-[#fff8e5] px-3 py-2 text-sm text-[#6f4b00]">
+              {notice}
+            </p>
+          ) : null}
+
           <form onSubmit={submitNewVersion} className="grid gap-3 rounded-md border border-[#d9dee7] bg-[#f8fafc] p-3">
             <PanelTitle title="새 버전" />
             <label className="grid gap-2 text-sm font-medium text-[#252a31]">

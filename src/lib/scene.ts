@@ -166,7 +166,29 @@ export function normalizeRoomScene(
     walls: uniqueWalls,
     furniture: normalizedGroups.furniture,
     groups: normalizedGroups.groups,
-    meta: scene.meta && typeof scene.meta === "object" ? scene.meta : {},
+    meta: normalizeSceneMeta(scene.meta),
+  };
+}
+
+function normalizeSceneMeta(value: unknown): RoomScene["meta"] {
+  if (!isRecord(value)) {
+    return {};
+  }
+
+  const updatedAt = normalizeString(value.updatedAt, { allowEmpty: false, maxLength: 40 });
+
+  if (!updatedAt) {
+    return {};
+  }
+
+  const parsedUpdatedAt = new Date(updatedAt);
+
+  if (!Number.isFinite(parsedUpdatedAt.getTime())) {
+    return {};
+  }
+
+  return {
+    updatedAt: parsedUpdatedAt.toISOString(),
   };
 }
 
