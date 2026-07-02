@@ -34,6 +34,15 @@ export async function GET(_request: Request, context: RouteContext) {
     where: {
       roomId: room.id,
     },
+    select: {
+      version: true,
+      name: true,
+      memo: true,
+      width: true,
+      height: true,
+      createdAt: true,
+      updatedAt: true,
+    },
     orderBy: {
       version: "desc",
     },

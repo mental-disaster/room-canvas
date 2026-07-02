@@ -62,10 +62,16 @@ export async function PUT(request: Request, context: RouteContext) {
     return NextResponse.json({ message: "Invalid scene payload." }, { status: 400 });
   }
 
-  const versionNumber = safeVersion(body.version);
+  const versionNumber = safeVersion(body?.version);
 
   if (!versionNumber) {
     return NextResponse.json({ message: "Invalid version." }, { status: 400 });
+  }
+
+  const expectedUpdatedAt = parseUpdatedAt(body?.updatedAt);
+
+  if (!expectedUpdatedAt) {
+    return NextResponse.json({ message: "Invalid updatedAt." }, { status: 400 });
   }
 
   const serializedScene = serializeScene(scene);
@@ -100,9 +106,10 @@ export async function PUT(request: Request, context: RouteContext) {
       return { status: "not-found" as const };
     }
 
-    const updatedVersion = await tx.roomVersion.update({
+    const savedVersion = await tx.roomVersion.updateMany({
       where: {
         id: targetVersion.id,
+        updatedAt: expectedUpdatedAt,
       },
       data: {
         width: scene.canvas.width,
@@ -110,6 +117,20 @@ export async function PUT(request: Request, context: RouteContext) {
         scene: serializedScene,
       },
     });
+
+    if (savedVersion.count === 0) {
+      return { status: "conflict" as const };
+    }
+
+    const updatedVersion = await tx.roomVersion.findUnique({
+      where: {
+        id: targetVersion.id,
+      },
+    });
+
+    if (!updatedVersion) {
+      return { status: "not-found" as const };
+    }
 
     await tx.room.updateMany({
       where: {
@@ -149,5 +170,22 @@ export async function PUT(request: Request, context: RouteContext) {
     return NextResponse.json({ message: "Room version not found." }, { status: 404 });
   }
 
+  if (result.status === "conflict") {
+    return NextResponse.json(
+      { message: "This version has changed since you opened it." },
+      { status: 409 },
+    );
+  }
+
   return NextResponse.json(toRoomPayload(result.room, result.version));
+}
+
+function parseUpdatedAt(value: unknown) {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const date = new Date(value);
+
+  return Number.isFinite(date.getTime()) ? date : null;
 }
