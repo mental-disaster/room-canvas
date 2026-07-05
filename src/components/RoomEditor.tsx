@@ -2189,10 +2189,12 @@ export function RoomEditor({ initialRoom }: { initialRoom: RoomPayload }) {
                       )}
                       <Text
                         x={0}
-                        y={item.height / 2 - 7}
+                        y={0}
                         width={item.width}
+                        height={item.height}
                         text={item.label}
                         align="center"
+                        verticalAlign="middle"
                         fontSize={13}
                         fill="#252a31"
                         listening={false}
@@ -3132,10 +3134,12 @@ async function createRoomImageBlob({
       group.add(
         new Konva.Text({
           x: 0,
-          y: item.height / 2 - 7,
+          y: 0,
           width: item.width,
+          height: item.height,
           text: item.label,
           align: "center",
+          verticalAlign: "middle",
           fontSize: 13,
           fill: "#252a31",
           listening: false,
